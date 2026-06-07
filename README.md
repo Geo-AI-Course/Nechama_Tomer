@@ -67,9 +67,7 @@ Input shapefile
       │                         → intermediate_data/OSM_roads_merge.shp
       ▼
 [Part 3] Parallel roads ─────── detect and collapse parallel duplicate carriageways;
-      │                         keep higher-ranked class;
-      │                         if gap < 10 m → replace with centerline,
-      │                         otherwise keep longer line;
+      │                         keep higher-ranked road, or longer if same rank;
       │                         extend Y-intersection branches to perpendicular road
       │                         or traffic circle;
       │                         recalculate length_m, length_km
@@ -140,9 +138,8 @@ Tunnels (`tunnel = T`) are never merged with non-tunnel segments.
 
 | Condition | Action |
 |-----------|--------|
-| Two roads with the same general direction | Keep the higher-class road; remove the lower |
-| Distance between parallels < 10 m for most of their length | Replace both with a computed centerline |
-| Distance ≥ 10 m | Keep the longer line; delete the shorter |
+| Two roads with different class ranks | Keep the higher-rank road; delete the lower-rank road |
+| Two roads with the same class rank | Keep the longer road; delete the shorter road |
 | Y-shaped intersection where both branches mirror each other | Extend the longest (base) road to the perpendicular road or traffic circle |
 
 ---

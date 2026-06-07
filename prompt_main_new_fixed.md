@@ -134,19 +134,13 @@ Two roads are considered parallel when:
 - Their overall bearings differ by ≤ 20° (same or opposite direction), AND
 - Their lateral separation at the midpoint of the shorter road is ≤ 15 m.
 
-### Collapse rules (applied in order)
+### Collapse rules
 
 **Rule 1 — Different class ranks:**
-Delete the lower-rank road entirely. Keep the higher-rank road unchanged.
+Keep the higher-rank road unchanged. Delete the lower-rank road.
 
-**Rule 2 — Same class rank, mostly close:**
-Sample 80 evenly-spaced points along the shorter road.
-If ≥ 50% of those points are within 10 m of the longer road, create a
-**centerline** (point-wise average of the two geometries).
-Keep the attributes from the longer road. Delete both originals.
-
-**Rule 3 — Same class rank, not mostly close:**
-Keep the longer road. Delete the shorter road.
+**Rule 2 — Same class rank:**
+Keep the longer road unchanged. Delete the shorter road.
 
 ### Y-split (divided highway fork) — clarified
 
@@ -238,7 +232,7 @@ python road_pipeline.py --shp input.shp --crs 32636 --out final/output.shp
 |---|---|
 | Hierarchy vs. length when merging — which wins? | **Hierarchy always wins.** Length only breaks ties within the same class. |
 | Tunnel merge rule | `tunnel = T` merges only with `tunnel = T`. Never with non-tunnel. |
-| "Most of the distance" threshold for parallel roads | **50%** of the shorter road's sampled points within 10 m. |
+| Parallel roads collapse rule | Higher-rank wins; same rank → keep longer, drop shorter. No centerline averaging. |
 | "1 intersection point" in Part 5 | Roads that connect to the network at **exactly 1 endpoint** (dead-end stubs). |
 | Input CRS / coordinate system | CLI accepts `--crs` EPSG code; default is 32636 (UTM Zone 36N). |
 | Y-split scenario in Part 3 | A divided highway fork: two mirrored branches sharing a common stem endpoint, diverging in similar directions. Extend the stem, delete both arms. |

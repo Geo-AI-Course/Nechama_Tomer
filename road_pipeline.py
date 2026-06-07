@@ -62,8 +62,7 @@ MERGE_ANGLE_TOL = 10.0   # degrees — max deviation from 180° to allow merge
 
 PARALLEL_BEARING_TOL = 20.0  # degrees — bearing similarity for parallel detection
 PARALLEL_DETECT_DIST = 15.0  # metres — max lateral distance to examine
-PARALLEL_CLOSE_DIST  = 10.0  # metres — threshold for centerline collapse
-PARALLEL_CLOSE_FRAC  = 0.50  # fraction of shorter road within close dist
+PARALLEL_CLOSE_DIST  = 10.0  # metres — lateral threshold for parallel detection
 
 FORK_BEARING_TOL = 30.0  # degrees — arms of a Y-split share bearing within this
 
@@ -95,7 +94,7 @@ def _print_report(n_initial: int) -> None:
     print(f"  Output features  : {n_final:,}")
     print(f"  Total removed    : {sum(r['n_removed'] for r in _REPORT):,}")
     print(f"  Total merged     : {sum(r['n_merged']  for r in _REPORT):,}\n")
-    hdr = f"  {'Part':<44} {'After':>8} {'Removed':>9} {'Merged':>8} {'Δ%':>7}"
+    hdr = f"  {'Part':<44} {'After':>8} {'Removed':>9} {'Merged':>8} {'Chg%':>7}"
     print(hdr)
     print(f"  {'-'*44} {'-'*8} {'-'*9} {'-'*8} {'-'*7}")
     for r in _REPORT:
@@ -470,20 +469,10 @@ def part2_merge_lines(gdf: gpd.GeoDataFrame):
 # Part 3 — Parallel roads
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _close_fraction(short: LineString, long_: LineString,
-                    dist: float, n: int = 80) -> float:
-    """Fraction of evenly-spaced sample points on `short` within `dist` of `long_`."""
-    count = sum(
-        1 for i in range(n)
-        if short.interpolate(i / max(n - 1, 1), normalized=True).distance(long_) <= dist
-    )
-    return count / n
-
 
 def part3_parallel_roads(gdf: gpd.GeoDataFrame):
     df      = gdf.reset_index(drop=True).copy()
     dropped: set  = set()
-    replace: dict = {}       # orig_idx → new row (centerline)
 
     sindex = df.sindex
 
@@ -524,39 +513,14 @@ def part3_parallel_roads(gdf: gpd.GeoDataFrame):
                 si, sri, gi = j, rank_j, geom_j
                 li, lri, gl = i, rank_i, geom_i
 
-            # Rule 1: different ranks — delete lower rank
-            if sri != lri:
-                dropped.add(si if sri > lri else li)
-                continue
-
-            # Rule 2 & 3: same rank — check close fraction
-            # Align directions before centerline
-            gl_rev = (LineString(list(gl.coords)[::-1])
-                      if _angle_diff(_line_bearing(gi), _line_bearing(gl)) > 90
-                      else gl)
-
-            frac = _close_fraction(gi, gl, PARALLEL_CLOSE_DIST)
-            if frac >= PARALLEL_CLOSE_FRAC:
-                # Create centerline; winner attrs from longer road
-                try:
-                    cl = _make_centerline(gl_rev, gi)
-                except Exception:
-                    cl = gl
-                winner = df.iloc[li].copy()
-                winner["geometry"] = cl
-                replace[li] = winner
-                dropped.add(si)
-                dropped.add(li)   # will be replaced, not truly dropped
+            # Keep the higher-rank road; if same rank, keep the longer one
+            if sri < lri:
+                dropped.add(li)
             else:
-                dropped.add(si)   # keep longer, drop shorter
+                dropped.add(si)
 
     # Build result
-    rows = []
-    for i in range(len(df)):
-        if i in dropped and i not in replace:
-            continue
-        rows.append(replace[i] if i in replace else df.iloc[i])
-
+    rows = [df.iloc[i] for i in range(len(df)) if i not in dropped]
     result = gpd.GeoDataFrame(rows, crs=df.crs,
                               geometry="geometry").reset_index(drop=True)
 
@@ -565,7 +529,7 @@ def part3_parallel_roads(gdf: gpd.GeoDataFrame):
     if n_fork:
         print(f"  Y-split: removed {n_fork:,} fork arms")
 
-    n_removed = len(df) - (len(result) - (len(replace) if replace else 0))
+    n_removed = len(df) - len(result)
     result = _add_lengths(result)
     return result, max(0, n_removed)
 
