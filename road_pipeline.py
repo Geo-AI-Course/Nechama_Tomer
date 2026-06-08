@@ -29,7 +29,7 @@ from pathlib import Path
 import geopandas as gpd
 import pandas as pd
 from shapely.geometry import LineString, Point, Polygon
-from shapely.ops import unary_union
+from shapely.ops import nearest_points, unary_union
 
 warnings.filterwarnings("ignore")
 
@@ -64,6 +64,8 @@ MERGE_ANGLE_TOL_REF = 45.0   # degrees — wider tolerance for same-ref merges
 PARALLEL_BEARING_TOL = 20.0  # degrees — bearing similarity for parallel detection
 PARALLEL_DETECT_DIST = 15.0  # metres — max lateral distance to examine
 PARALLEL_CLOSE_DIST  = 10.0  # metres — lateral threshold for parallel detection
+PARALLEL_EXTEND_MAX_M = 50.0  # metres — max snap distance when extending connectors to kept parallel
+PARALLEL_SNAP_TO_JN_M = 5.0   # metres — prefer existing junction within this radius of natural snap point
 
 FORK_BEARING_TOL = 30.0  # degrees — arms of a Y-split share bearing within this
 
@@ -643,13 +645,17 @@ def part2_merge_lines(gdf: gpd.GeoDataFrame):
 
 def _extend_to_parallel(df: gpd.GeoDataFrame, dropped: set,
                         drop_to_kept: dict) -> None:
-    """Extend each connector of a dropped road to the nearest endpoint of its kept parallel.
+    """Extend connectors of dropped roads to the nearest point on their kept parallel.
 
-    Resolves multi-hop chains (A→B→C where B is also dropped) before extending,
-    so every connector jumps directly to the final surviving road.
+    Covers all vertices of the dropped road (not just its two endpoints), so
+    T-intersections along the dropped road are also re-attached.  For each
+    connector endpoint the snap target is the nearest point on the kept road
+    geometry; if an existing junction lies within PARALLEL_SNAP_TO_JN_M of
+    that point, the connector snaps to the junction instead (X-intersection).
+    Extensions beyond PARALLEL_EXTEND_MAX_M are skipped.
     Modifies df geometry in-place.
     """
-    # Resolve chains to final survivor
+    # Resolve multi-hop chains (A→B→C where B is also dropped)
     resolved: dict = {}
     for d_idx in drop_to_kept:
         seen: set = set()
@@ -659,32 +665,56 @@ def _extend_to_parallel(df: gpd.GeoDataFrame, dropped: set,
             cur = drop_to_kept[cur]
         resolved[d_idx] = cur
 
-    # Build endpoint map for all rows (dropped + non-dropped)
+    # Endpoint map: rounded_coord → [(row_idx, "start"|"end"), ...]
     ep_map: dict = defaultdict(list)
     for i in range(len(df)):
         c = list(df.iloc[i].geometry.coords)
         ep_map[_rpt(c[0])].append((i, "start"))
         ep_map[_rpt(c[-1])].append((i, "end"))
 
-    for d_idx, k_idx in resolved.items():
-        k_geom  = df.iloc[k_idx].geometry
-        k_start = Point(k_geom.coords[0])
-        k_end   = Point(k_geom.coords[-1])
-        k_s_xy  = (k_geom.coords[0][0],  k_geom.coords[0][1])
-        k_e_xy  = (k_geom.coords[-1][0], k_geom.coords[-1][1])
+    # Spatial index over all unique endpoint locations for junction snapping
+    ep_keys = list(ep_map.keys())
+    ep_pts  = gpd.GeoDataFrame(
+        {"key_idx": range(len(ep_keys))},
+        geometry=[Point(k) for k in ep_keys],
+        crs=df.crs,
+    )
+    ep_si = ep_pts.sindex
 
+    for d_idx, k_idx in resolved.items():
+        k_geom   = df.iloc[k_idx].geometry
         d_coords = list(df.iloc[d_idx].geometry.coords)
-        for raw_pt in (d_coords[0], d_coords[-1]):
+
+        for raw_pt in d_coords:           # all vertices, including T-junction ones
             ep_key = _rpt(raw_pt)
-            pt     = Point(raw_pt)
-            snap   = k_s_xy if pt.distance(k_start) <= pt.distance(k_end) else k_e_xy
+            if ep_key not in ep_map:
+                continue
+            pt = Point(raw_pt)
+
+            # Nearest point anywhere along kept road geometry
+            _, snap_shapely = nearest_points(pt, k_geom)
+            snap_xy   = (snap_shapely.x, snap_shapely.y)
+            snap_dist = pt.distance(snap_shapely)
+
+            # Prefer an existing junction within PARALLEL_SNAP_TO_JN_M
+            near = list(ep_si.query(snap_shapely.buffer(PARALLEL_SNAP_TO_JN_M)))
+            if near:
+                best_i = min(near,
+                             key=lambda i: snap_shapely.distance(ep_pts.iloc[i].geometry))
+                best_pt = ep_pts.iloc[best_i].geometry
+                if snap_shapely.distance(best_pt) <= PARALLEL_SNAP_TO_JN_M:
+                    snap_xy   = (best_pt.x, best_pt.y)
+                    snap_dist = pt.distance(best_pt)
+
+            if snap_dist > PARALLEL_EXTEND_MAX_M:
+                continue
 
             for conn_idx, conn_end in ep_map[ep_key]:
                 if conn_idx == d_idx or conn_idx in dropped:
                     continue
                 c = list(df.iloc[conn_idx].geometry.coords)
-                new_coords = ([snap] + c[1:] if conn_end == "start"
-                              else c[:-1] + [snap])
+                new_coords = ([snap_xy] + c[1:] if conn_end == "start"
+                              else c[:-1] + [snap_xy])
                 if len(new_coords) >= 2:
                     df.at[conn_idx, "geometry"] = LineString(new_coords)
 
