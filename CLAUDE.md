@@ -30,7 +30,7 @@ pip install -r requirements.txt
 
 All geometry work runs in a user-specified projected CRS (default EPSG:32636 UTM36N). The pipeline reads one shapefile, runs five parts in order, saves an intermediate shapefile after each part, and writes the final output to `final/`.
 
-**Part 1 `part1_preprocess`** — Load, reproject, remove `fclass` values containing `"link"` or equal to `"busway"`, add a `class` column mapped from `CLASS_MAP`, then call `_detect_traffic_circles` which traces closed loops via `_trace_loop` and tags qualifying loops (isoperimetric Q ≥ 0.70, radius ≤ 50 m) as `class = "traffic circle"`.
+**Part 1 `part1_preprocess`** — Load, reproject, remove `fclass` values containing `"link"` or equal to `"busway"`, add a `class` column mapped from `CLASS_MAP`, then call `_detect_traffic_circles` which traces closed loops via `_trace_loop` and tags qualifying loops (isoperimetric Q ≥ 0.90, radius ≤ 50 m) as `class = "traffic circle"`.
 
 **Part 2 `part2_merge_lines`** — Iterative endpoint-matching merge. Each pass builds a junction map (rounded coordinates → segment endpoints), finds the straightest pair at each junction using `_best_pair`, and merges them with `_merge_geoms`. Continues until no new merges occur. Junction cases: 2-line always merges; 3-line Y (no pair within 10°) skips; T/X/5+ merges the pair closest to 180°. Tunnels only merge with tunnels. Winner attributes come from the higher class rank.
 

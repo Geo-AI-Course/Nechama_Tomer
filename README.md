@@ -79,8 +79,8 @@ Input shapefile
       │                         recalculate length_m, length_km
       │                         → intermediate_data/OSM_roads_merge_paralle_circle.shp
       ▼
-[Part 5] Remove short roads ─── drop any road with only 1 intersection point
-                                and length < 100 m;
+[Part 5] Remove short roads ─── Rule 1: drop dead-end stubs (1 connection, < 100 m);
+                                Rule 2: drop isolated roads (0 connections, < 200 m);
                                 recalculate length_m, length_km
                                 → final/<output>.shp
 ```
@@ -110,8 +110,15 @@ Features identified as traffic circles are assigned `class = "traffic circle"`.
 A set of line segments is classified as a traffic circle when:
 
 - The segments form a closed loop (circle, oval, or near-circular shape).
-- The radius of the enclosing shape is **less than 50 m**.
-- Typically 1–10 segments form the loop (more are possible).
+- The isoperimetric quotient **Q = 4π × area / perimeter² ≥ 0.90**.
+- The bounding-circle radius **r ≤ 50 m**.
+- Typically 1–10 segments form the loop (more are allowed).
+
+Detection runs in three passes:
+
+1. **Self-closing single segments** (start == end) — detected directly from the enclosed polygon area.
+2. **Multi-segment closed loops** — traced via a "head-home" heuristic that follows connected segments back to the chain's origin.
+3. **Near-complete open arcs** — chains whose remaining gap is less than **12.5 % of the full circumference** (`gap / (arc_length + gap) < 0.125`). A synthetic closing segment is inserted to complete the ring; the entire chain (plus closing segment) is then tagged as a traffic circle.
 
 Detected traffic circles are tagged `class = "traffic circle"` and handled in Part 4.
 
@@ -119,7 +126,19 @@ Detected traffic circles are tagged `class = "traffic circle"` and handled in Pa
 
 ## Line merging rules (Part 2)
 
-Two lines are candidates for merging when their start or end vertices touch and the angle between them is within **±10° of 180°** (measured using the next vertex from the connection point).
+Merging runs in two sequential phases, each iterated until convergence:
+
+**Phase 1 — ref-based pass (runs first):**  
+Segments that share the same non-empty `ref` road number and whose endpoints touch
+are merged with a **±45° tolerance**. This joins numbered-road segments preferentially
+before the generic angle pass.
+
+Segments with a compound ref (e.g. `ref = "1:6"`) are first **duplicated** into one
+copy per road number (`ref = "1"` and `ref = "6"`). Each copy then participates in
+Phase 1 with its respective road number.
+
+**Phase 2 — angle-based pass:**  
+All remaining segments are merged using the standard angle rules below.
 
 | Junction type | Merge behaviour |
 |---------------|-----------------|
@@ -129,8 +148,9 @@ Two lines are candidates for merging when their start or end vertices touch and 
 | **X / + intersection (4 lines)** | Merge the pair closest to 180° (within ±10°) |
 | **5 + lines at 1 point** | Find and merge any pair closest to 180° (within ±10°) |
 
-When merging, attributes are taken from the **longest** road; if lengths are equal, the **highest-hierarchy class** wins.  
-Tunnels (`tunnel = T`) are never merged with non-tunnel segments.
+In both phases, **hierarchy always wins** when choosing attributes: the higher-rank
+class road provides the attributes. Length breaks ties within the same class.  
+Tunnels (`tunnel = T`) are never merged with non-tunnel segments in either phase.
 
 ---
 

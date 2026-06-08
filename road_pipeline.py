@@ -28,7 +28,7 @@ from pathlib import Path
 
 import geopandas as gpd
 import pandas as pd
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
 warnings.filterwarnings("ignore")
@@ -54,11 +54,12 @@ CLASS_RANK = {
     "Track": 4,   "Other": 5,       "Bike": 6,  "traffic circle": 7,
 }
 
-TC_CIRCULARITY_THR = 0.95   # isoperimetric quotient threshold for traffic circles
+TC_CIRCULARITY_THR = 0.90   # isoperimetric quotient threshold for traffic circles
 TC_MAX_RADIUS_M    = 50.0   # max bounding-circle radius (m)
 
 MERGE_PREC      = 0.5    # metres — coordinate rounding for vertex matching
-MERGE_ANGLE_TOL = 10.0   # degrees — max deviation from 180° to allow merge
+MERGE_ANGLE_TOL     = 10.0   # degrees — max deviation from 180° to allow merge
+MERGE_ANGLE_TOL_REF = 45.0   # degrees — wider tolerance for same-ref merges
 
 PARALLEL_BEARING_TOL = 20.0  # degrees — bearing similarity for parallel detection
 PARALLEL_DETECT_DIST = 15.0  # metres — max lateral distance to examine
@@ -67,6 +68,8 @@ PARALLEL_CLOSE_DIST  = 10.0  # metres — lateral threshold for parallel detecti
 FORK_BEARING_TOL = 30.0  # degrees — arms of a Y-split share bearing within this
 
 SHORT_ROAD_M     = 100.0  # metres — dead-end removal threshold
+ISOLATED_ROAD_M  = 200.0  # metres — isolated (0-connection) removal threshold
+TC_GAP_FRACTION  = 0.125  # max gap / total perimeter for near-complete circle autocompletion
 INTERMEDIATE_DIR = "intermediate_data"
 
 
@@ -195,7 +198,13 @@ def _trace_loop(start: int, adj: dict, ep: dict, max_segs: int = 50):
         nexts = adj[cur] - visited
         if not nexts:
             return None
-        nxt = next(iter(nexts))
+        # Among candidates, prefer the one whose far endpoint is closest to
+        # origin — this "heads home" and traces the tightest circular path.
+        def _far_dist(k):
+            ns, ne = ep[k]
+            far = ne if ns == cur else ns
+            return math.hypot(far[0] - origin[0], far[1] - origin[1])
+        nxt = min(nexts, key=_far_dist)
         chain.append(nxt)
         visited.add(nxt)
         ns, ne = ep[nxt]
@@ -219,6 +228,16 @@ def _save_final(gdf: gpd.GeoDataFrame, out_path: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     gdf.to_file(p)
     print(f"  Saved {len(gdf):,} features -> {p.resolve()}")
+
+
+def _save_deleted(gdf: gpd.GeoDataFrame, name: str) -> None:
+    if gdf is None or len(gdf) == 0:
+        print(f"  No features deleted -> {name}.shp skipped")
+        return
+    p = Path(INTERMEDIATE_DIR) / f"{name}.shp"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    gdf.to_file(p)
+    print(f"  Saved {len(gdf):,} deleted features -> {p}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -266,6 +285,7 @@ def part1_preprocess(path: str, crs: int):
     remove      = mask_link | mask_busway
     print(f"  Removing {int(mask_link.sum()):,} link-type "
           f"+ {int(mask_busway.sum()):,} busway")
+    deleted = gdf[remove].copy()
     gdf = gdf[~remove].copy().reset_index(drop=True)
 
     # Add class column
@@ -275,7 +295,7 @@ def part1_preprocess(path: str, crs: int):
     gdf = _detect_traffic_circles(gdf)
     print(f"  class distribution: {dict(gdf['class'].value_counts())}")
 
-    return gdf, n_before
+    return gdf, n_before, deleted
 
 
 def _detect_traffic_circles(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -294,6 +314,33 @@ def _detect_traffic_circles(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     tc_segs: set = set()
     n_circles = 0
 
+    # Pass 1: self-closed single-segment rings (start == end).
+    # OSM often stores a complete roundabout as one closed way.
+    for i in range(len(gdf)):
+        s_pt, e_pt = ep[i]
+        if s_pt != e_pt:
+            continue
+        geom = gdf.iloc[i].geometry
+        coords = list(geom.coords)
+        if len(coords) < 3:
+            continue
+        try:
+            poly = Polygon(coords)
+        except Exception:
+            continue
+        if poly.area == 0:
+            continue
+        perim = geom.length
+        if perim == 0:
+            continue
+        Q      = 4 * math.pi * poly.area / (perim ** 2)
+        radius = math.sqrt(poly.area / math.pi)
+        if Q >= TC_CIRCULARITY_THR and radius <= TC_MAX_RADIUS_M:
+            tc_segs.add(i)
+            visited.add(i)
+            n_circles += 1
+
+    # Pass 2: multi-segment closed loops traced from open-arc endpoints.
     for i in range(len(gdf)):
         if i in visited:
             continue
@@ -325,11 +372,78 @@ def _detect_traffic_circles(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
         visited.update(loop)
 
-    if n_circles:
+    # Pass 3: Near-complete open arcs missing < TC_GAP_FRACTION of circumference.
+    # For each unvisited segment, trace a chain toward the start point using the
+    # same "head-home" heuristic as _trace_loop.  When the remaining gap is small
+    # enough, check Q and radius on the synthetically completed polygon; if both
+    # pass, tag the chain and insert a synthetic closing segment.
+    new_close_segs: list = []
+    started: set = set()
+
+    for i in range(len(gdf)):
+        if i in visited or i in started:
+            continue
+        s_pt, e_pt = ep[i]
+
+        chain: list = [i]
+        chain_set: set = {i}
+        origin = s_pt
+        cur = e_pt
+        found = False
+
+        for _ in range(50):
+            arc_length = sum(gdf.iloc[k].geometry.length for k in chain)
+            gap = math.hypot(cur[0] - origin[0], cur[1] - origin[1])
+            total = arc_length + gap
+
+            if total > 0 and gap / total < TC_GAP_FRACTION:
+                geoms = [gdf.iloc[k].geometry for k in chain]
+                close_geom = LineString([cur, origin])
+                hull = unary_union(geoms + [close_geom]).convex_hull
+                if hasattr(hull, "area") and hull.area > 0:
+                    Q = 4 * math.pi * hull.area / (total ** 2)
+                    radius = math.sqrt(hull.area / math.pi)
+                    if Q >= TC_CIRCULARITY_THR and radius <= TC_MAX_RADIUS_M:
+                        found = True
+                break  # gap threshold met — no point extending further
+
+            nexts = adj[cur] - chain_set - visited
+            if not nexts:
+                break
+
+            def _far_dist_arc(k):
+                ns, ne = ep[k]
+                far = ne if ns == cur else ns
+                return math.hypot(far[0] - origin[0], far[1] - origin[1])
+
+            nxt = min(nexts, key=_far_dist_arc)
+            chain.append(nxt)
+            chain_set.add(nxt)
+            ns, ne = ep[nxt]
+            cur = ne if ns == cur else ns
+
+        started.update(chain)
+
+        if found:
+            for k in chain:
+                tc_segs.add(k)
+            visited.update(chain)
+            close_row = gdf.iloc[chain[0]].copy()
+            close_row["geometry"] = LineString([cur, origin])
+            close_row["class"] = "traffic circle"
+            new_close_segs.append(close_row)
+            n_circles += 1
+
+    if n_circles or new_close_segs:
         print(f"  Detected {n_circles:,} traffic circles "
-              f"({len(tc_segs):,} segments)")
+              f"({len(tc_segs):,} segments, "
+              f"{len(new_close_segs):,} autocompleted)")
         gdf = gdf.copy()
-        gdf.loc[list(tc_segs), "class"] = "traffic circle"
+        if tc_segs:
+            gdf.loc[list(tc_segs), "class"] = "traffic circle"
+        if new_close_segs:
+            extra = gpd.GeoDataFrame(new_close_segs, crs=gdf.crs)
+            gdf = pd.concat([gdf, extra], ignore_index=True)
 
     return gdf
 
@@ -373,16 +487,47 @@ def _best_pair(candidates: list):
     return best
 
 
-def part2_merge_lines(gdf: gpd.GeoDataFrame):
+def _expand_compound_refs(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Duplicate segments whose ref contains ':' (e.g. '1:6') into one copy
+    per road number so each copy can participate in ref-based merging."""
+    gdf = gdf.copy().reset_index(drop=True)
+    extra = []
+    for i in range(len(gdf)):
+        r = str(gdf.iloc[i].get("ref", "") or "").strip()
+        if ":" not in r:
+            continue
+        parts = [p.strip() for p in r.split(":") if p.strip()]
+        if len(parts) < 2:
+            continue
+        gdf.at[i, "ref"] = parts[0]
+        for part in parts[1:]:
+            new_row = gdf.iloc[i].copy()
+            new_row["ref"] = part
+            extra.append(new_row)
+    if extra:
+        gdf = pd.concat([gdf, gpd.GeoDataFrame(extra, crs=gdf.crs)],
+                        ignore_index=True)
+    return gdf
+
+
+def _merge_pass(gdf: gpd.GeoDataFrame, ref_only: bool = False):
+    """Run iterative merge passes until convergence.
+
+    ref_only=True  — Phase 1: only pairs sharing the same non-empty ref,
+                     angle tolerance MERGE_ANGLE_TOL_REF (45°).
+    ref_only=False — Phase 2: all pairs, angle tolerance MERGE_ANGLE_TOL (10°).
+    """
     df = gdf.reset_index(drop=True).copy()
     total_merged = 0
     passes = 0
+    deleted_rows: list = []
+    angle_tol   = MERGE_ANGLE_TOL_REF if ref_only else MERGE_ANGLE_TOL
+    phase_label = "ref" if ref_only else "angle"
 
     while True:
         df = df.reset_index(drop=True)
         passes += 1
 
-        # Build junction map: rounded_pt → [(seg_idx, "start"|"end"), ...]
         jmap: dict = defaultdict(list)
         for i in range(len(df)):
             c = list(df.iloc[i].geometry.coords)
@@ -393,7 +538,6 @@ def part2_merge_lines(gdf: gpd.GeoDataFrame):
         new_rows: list   = []
 
         for pt, endpoints in jmap.items():
-            # Unique segments at this junction (dedup, preserve order)
             seen_ids: dict = {}
             for idx, which in endpoints:
                 if idx not in seen_ids:
@@ -403,17 +547,27 @@ def part2_merge_lines(gdf: gpd.GeoDataFrame):
             if len(seg_ids) < 2:
                 continue
 
-            # Skip junctions involving traffic circles
             if any(df.iloc[s].get("class") == "traffic circle"
                    for s in seg_ids):
                 continue
 
-            # Compute toward-junction bearing for each candidate segment
             candidates = [
                 (s, seen_ids[s],
                  _bearing_toward_jn(df.iloc[s].geometry, seen_ids[s]))
                 for s in seg_ids
             ]
+
+            if ref_only:
+                # Keep only the largest group of same-ref candidates
+                ref_groups: dict = defaultdict(list)
+                for cand in candidates:
+                    r = str(df.iloc[cand[0]].get("ref", "") or "").strip()
+                    if r:
+                        ref_groups[r].append(cand)
+                same_ref = max(ref_groups.values(), key=len, default=[])
+                if len(same_ref) < 2:
+                    continue
+                candidates = same_ref
 
             result = _best_pair(candidates)
             if result is None:
@@ -421,11 +575,9 @@ def part2_merge_lines(gdf: gpd.GeoDataFrame):
 
             i_idx, i_which, j_idx, j_which, diff = result
 
-            # Y intersection: 3 lines, no pair within tolerance → skip
-            if diff > MERGE_ANGLE_TOL:
+            if diff > angle_tol:
                 continue
 
-            # Tunnel compatibility: T-tunnel never merges with non-tunnel
             tun_i = str(df.iloc[i_idx].get("tunnel", "F") or "F").upper() == "T"
             tun_j = str(df.iloc[j_idx].get("tunnel", "F") or "F").upper() == "T"
             if tun_i != tun_j:
@@ -436,7 +588,6 @@ def part2_merge_lines(gdf: gpd.GeoDataFrame):
             if merged_geom is None:
                 continue
 
-            # Attribute winner: higher class rank (lower rank number)
             row_i = df.iloc[i_idx]
             row_j = df.iloc[j_idx]
             ri = CLASS_RANK.get(row_i.get("class", "Other"), 5)
@@ -449,20 +600,40 @@ def part2_merge_lines(gdf: gpd.GeoDataFrame):
             merged_this.add(j_idx)
 
         if not merged_this:
-            print(f"  Converged after {passes} pass(es)")
+            print(f"  Phase {phase_label}: converged after {passes} pass(es)")
             break
 
+        deleted_rows.append(df[df.index.isin(merged_this)].copy())
         survivors = df[~df.index.isin(merged_this)].copy()
         new_gdf   = gpd.GeoDataFrame(new_rows, crs=df.crs, geometry="geometry")
         df        = pd.concat([survivors, new_gdf],
                               ignore_index=True).reset_index(drop=True)
         n_pairs   = len(merged_this) // 2
         total_merged += n_pairs
-        print(f"  Pass {passes}: merged {n_pairs:,} pairs "
+        print(f"  Phase {phase_label} pass {passes}: merged {n_pairs:,} pairs "
               f"({len(df):,} features remaining)")
 
+    deleted_gdf = (pd.concat(deleted_rows, ignore_index=True)
+                   if deleted_rows else gpd.GeoDataFrame(columns=df.columns, crs=df.crs))
+    return df, total_merged, deleted_gdf
+
+
+def part2_merge_lines(gdf: gpd.GeoDataFrame):
+    df = _expand_compound_refs(gdf)
+    n_expanded = len(df) - len(gdf)
+    if n_expanded:
+        print(f"  Expanded {n_expanded:,} compound-ref segment(s) into copies")
+
+    df, merged_ref,   deleted_ref   = _merge_pass(df, ref_only=True)
+    df, merged_angle, deleted_angle = _merge_pass(df, ref_only=False)
+
+    total_merged = merged_ref + merged_angle
+    all_deleted  = [d for d in (deleted_ref, deleted_angle) if len(d)]
+    deleted_gdf  = (pd.concat(all_deleted, ignore_index=True)
+                    if all_deleted
+                    else gpd.GeoDataFrame(columns=df.columns, crs=df.crs))
     df = _add_lengths(df)
-    return df, total_merged
+    return df, total_merged, deleted_gdf
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -470,9 +641,58 @@ def part2_merge_lines(gdf: gpd.GeoDataFrame):
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+def _extend_to_parallel(df: gpd.GeoDataFrame, dropped: set,
+                        drop_to_kept: dict) -> None:
+    """Extend each connector of a dropped road to the nearest endpoint of its kept parallel.
+
+    Resolves multi-hop chains (A→B→C where B is also dropped) before extending,
+    so every connector jumps directly to the final surviving road.
+    Modifies df geometry in-place.
+    """
+    # Resolve chains to final survivor
+    resolved: dict = {}
+    for d_idx in drop_to_kept:
+        seen: set = set()
+        cur = drop_to_kept[d_idx]
+        while cur in drop_to_kept and cur not in seen:
+            seen.add(cur)
+            cur = drop_to_kept[cur]
+        resolved[d_idx] = cur
+
+    # Build endpoint map for all rows (dropped + non-dropped)
+    ep_map: dict = defaultdict(list)
+    for i in range(len(df)):
+        c = list(df.iloc[i].geometry.coords)
+        ep_map[_rpt(c[0])].append((i, "start"))
+        ep_map[_rpt(c[-1])].append((i, "end"))
+
+    for d_idx, k_idx in resolved.items():
+        k_geom  = df.iloc[k_idx].geometry
+        k_start = Point(k_geom.coords[0])
+        k_end   = Point(k_geom.coords[-1])
+        k_s_xy  = (k_geom.coords[0][0],  k_geom.coords[0][1])
+        k_e_xy  = (k_geom.coords[-1][0], k_geom.coords[-1][1])
+
+        d_coords = list(df.iloc[d_idx].geometry.coords)
+        for raw_pt in (d_coords[0], d_coords[-1]):
+            ep_key = _rpt(raw_pt)
+            pt     = Point(raw_pt)
+            snap   = k_s_xy if pt.distance(k_start) <= pt.distance(k_end) else k_e_xy
+
+            for conn_idx, conn_end in ep_map[ep_key]:
+                if conn_idx == d_idx or conn_idx in dropped:
+                    continue
+                c = list(df.iloc[conn_idx].geometry.coords)
+                new_coords = ([snap] + c[1:] if conn_end == "start"
+                              else c[:-1] + [snap])
+                if len(new_coords) >= 2:
+                    df.at[conn_idx, "geometry"] = LineString(new_coords)
+
+
 def part3_parallel_roads(gdf: gpd.GeoDataFrame):
-    df      = gdf.reset_index(drop=True).copy()
-    dropped: set  = set()
+    df           = gdf.reset_index(drop=True).copy()
+    dropped: set = set()
+    drop_to_kept: dict = {}
 
     sindex = df.sindex
 
@@ -516,22 +736,34 @@ def part3_parallel_roads(gdf: gpd.GeoDataFrame):
             # Keep the higher-rank road; if same rank, keep the longer one
             if sri < lri:
                 dropped.add(li)
+                drop_to_kept[li] = si
             else:
                 dropped.add(si)
+                drop_to_kept[si] = li
+
+    # Extend connectors of dropped roads to their kept parallel
+    _extend_to_parallel(df, dropped, drop_to_kept)
 
     # Build result
+    deleted_parallel = df[df.index.isin(dropped)].copy()
     rows = [df.iloc[i] for i in range(len(df)) if i not in dropped]
     result = gpd.GeoDataFrame(rows, crs=df.crs,
                               geometry="geometry").reset_index(drop=True)
 
     # Y-split handling
-    result, n_fork = _handle_y_splits(result)
+    result, n_fork, deleted_forks = _handle_y_splits(result)
     if n_fork:
         print(f"  Y-split: removed {n_fork:,} fork arms")
 
+    # Re-merge segments made collinear by the connector extensions
+    result, n_remerge, _ = _merge_pass(result, ref_only=False)
+    if n_remerge:
+        print(f"  Post-extension merge: {n_remerge:,} additional pair(s) merged")
+
+    deleted_gdf = pd.concat([deleted_parallel, deleted_forks], ignore_index=True)
     n_removed = len(df) - len(result)
     result = _add_lengths(result)
-    return result, max(0, n_removed)
+    return result, max(0, n_removed), n_remerge, deleted_gdf
 
 
 def _handle_y_splits(gdf: gpd.GeoDataFrame):
@@ -607,7 +839,10 @@ def _handle_y_splits(gdf: gpd.GeoDataFrame):
     _process(end_map,   "end")
 
     if not dropped and not replaced:
-        return gdf, 0
+        return gdf, 0, gpd.GeoDataFrame(columns=df.columns, crs=df.crs)
+
+    true_removed = dropped - set(replaced.keys())
+    deleted_forks = df[df.index.isin(true_removed)].copy()
 
     rows = []
     for i in range(len(df)):
@@ -617,7 +852,7 @@ def _handle_y_splits(gdf: gpd.GeoDataFrame):
 
     result = gpd.GeoDataFrame(rows, crs=df.crs,
                               geometry="geometry").reset_index(drop=True)
-    return result, len(dropped)
+    return result, len(dropped), deleted_forks
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -632,7 +867,7 @@ def part4_traffic_circles(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
     if len(tc) == 0:
         print("  No traffic circles found")
-        return df
+        return df, gpd.GeoDataFrame(columns=df.columns, crs=df.crs)
 
     # Group TC segments into individual circles by connectivity
     adj_tc: dict = defaultdict(set)
@@ -682,7 +917,7 @@ def part4_traffic_circles(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     n_tc = len(tc)
     print(f"  Removed {n_tc:,} traffic circle segments")
     roads = _add_lengths(roads)
-    return roads.reset_index(drop=True)
+    return roads.reset_index(drop=True), tc
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -699,22 +934,29 @@ def part5_short_roads(gdf: gpd.GeoDataFrame):
         ep_segs[_rpt(c[0])].add(i)
         ep_segs[_rpt(c[-1])].add(i)
 
-    drop: set = set()
+    drop_stub: set = set()
+    drop_isolated: set = set()
     for i in range(len(df)):
-        if df.iloc[i].geometry.length >= SHORT_ROAD_M:
-            continue
+        length = df.iloc[i].geometry.length
         c = list(df.iloc[i].geometry.coords)
         s, e = _rpt(c[0]), _rpt(c[-1])
         conn_s = len(ep_segs[s] - {i})
         conn_e = len(ep_segs[e] - {i})
-        # Exactly 1 connection point (dead-end on one side)
-        if (conn_s > 0) + (conn_e > 0) == 1:
-            drop.add(i)
+        connections = (conn_s > 0) + (conn_e > 0)
+        # Rule 1: exactly 1 connection (dead-end stub) AND length < 100 m
+        if connections == 1 and length < SHORT_ROAD_M:
+            drop_stub.add(i)
+        # Rule 2: 0 connections (isolated) AND length < 200 m
+        elif connections == 0 and length < ISOLATED_ROAD_M:
+            drop_isolated.add(i)
 
+    drop = drop_stub | drop_isolated
+    deleted = df[df.index.isin(drop)].copy()
     result = df[~df.index.isin(drop)].reset_index(drop=True)
     result = _add_lengths(result)
-    print(f"  Removed {len(drop):,} short dead-end roads (< {SHORT_ROAD_M:.0f} m)")
-    return result, len(drop)
+    print(f"  Removed {len(drop_stub):,} short dead-end roads (< {SHORT_ROAD_M:.0f} m)")
+    print(f"  Removed {len(drop_isolated):,} isolated roads (< {ISOLATED_ROAD_M:.0f} m)")
+    return result, len(drop), deleted
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -740,32 +982,37 @@ def main():
     print(sep)
 
     print("\n[Part 1] Preprocess")
-    gdf, n_initial = part1_preprocess(args.shp, args.crs)
+    gdf, n_initial, deleted1 = part1_preprocess(args.shp, args.crs)
     _record("1. Preprocess (links/busway removed)", n_initial, len(gdf))
     _save_intermediate(gdf, "OSM_roads_preprocess")
+    _save_deleted(deleted1, "deleted_part1")
 
     print("\n[Part 2] Merge lines")
     n0 = len(gdf)
-    gdf, n_merged = part2_merge_lines(gdf)
+    gdf, n_merged, deleted2 = part2_merge_lines(gdf)
     _record("2. Merge lines", n0, len(gdf), n_removed=0, n_merged=n_merged)
     _save_intermediate(gdf, "OSM_roads_merge")
+    _save_deleted(deleted2, "deleted_part2")
 
     print("\n[Part 3] Parallel roads")
     n0 = len(gdf)
-    gdf, n_removed3 = part3_parallel_roads(gdf)
-    _record("3. Parallel roads", n0, len(gdf), n_removed=n_removed3)
+    gdf, n_removed3, n_remerge3, deleted3 = part3_parallel_roads(gdf)
+    _record("3. Parallel roads", n0, len(gdf), n_removed=n_removed3, n_merged=n_remerge3)
     _save_intermediate(gdf, "OSM_roads_merge_paralle")
+    _save_deleted(deleted3, "deleted_part3")
 
     print("\n[Part 4] Traffic circle connections")
     n0 = len(gdf)
-    gdf = part4_traffic_circles(gdf)
+    gdf, deleted4 = part4_traffic_circles(gdf)
     _record("4. Traffic circles removed", n0, len(gdf))
     _save_intermediate(gdf, "OSM_roads_merge_paralle_circle")
+    _save_deleted(deleted4, "deleted_part4")
 
     print("\n[Part 5] Remove short roads")
     n0 = len(gdf)
-    gdf, n_removed5 = part5_short_roads(gdf)
+    gdf, n_removed5, deleted5 = part5_short_roads(gdf)
     _record("5. Short dead-end roads removed", n0, len(gdf), n_removed=n_removed5)
+    _save_deleted(deleted5, "deleted_part5")
 
     print(f"\n[Output] Save -> {args.out}")
     _save_final(gdf, args.out)

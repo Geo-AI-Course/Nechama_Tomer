@@ -48,11 +48,18 @@ If both roads have the same class, the longer road's attributes are kept.
 
 4. **Detect traffic circles:**
    - Build a graph of line endpoints.
-   - Trace connected components to find closed loops of line segments.
+   - **Single-segment closed rings** (segments where start == end) are
+     evaluated first: compute Q and r directly from the enclosed polygon.
+     If `Q ≥ 0.90` AND `r ≤ 50 m`, tag that segment as `"traffic circle"`.
+     (OSM often stores a complete roundabout as one self-closing way.)
+   - For remaining open-arc segments, trace connected components to find
+     closed multi-segment loops. At each junction, the next segment chosen is
+     the one whose far endpoint is closest to the loop origin — this "heads
+     home" and traces the tightest (most circular) path deterministically.
    - For each candidate loop compute:
      - Isoperimetric quotient: `Q = 4π × area / perimeter²`
      - Bounding-circle radius: `r = sqrt(area / π)`
-   - If `Q ≥ 0.70` AND `r ≤ 50 m`, set `class = "traffic circle"` for all
+   - If `Q ≥ 0.90` AND `r ≤ 50 m`, set `class = "traffic circle"` for all
      segments in that loop.
    - Loops of 1 to 10 segments are typical; any count is allowed.
 
@@ -80,8 +87,36 @@ are possible.
   Two lines form a straight-through pair when their toward-junction bearings are
   approximately 180° apart.
 
-- **Merge tolerance:** A pair is eligible for merging when the deviation from 180°
-  is ≤ 10°.
+- **Merge tolerance (angle pass):** A pair is eligible for merging when the deviation
+  from 180° is ≤ 10°.
+
+- **Merge tolerance (ref pass):** A pair sharing the same non-empty `ref` value is
+  eligible for merging when the deviation from 180° is ≤ 45°.
+
+### Compound `ref` values
+
+Some segments carry two road numbers separated by `":"` (e.g. `ref = "1:6"`).
+Before merging begins, split each such segment into **one copy per road number**
+(e.g. one copy with `ref = "1"` and one copy with `ref = "6"`).
+Both copies have the same geometry and all other attributes.
+Each copy then participates independently in the ref-based pass with its own
+single road number.
+
+### Two-phase merge order
+
+Merging runs in two sequential phases, each iterated until convergence:
+
+**Phase 1 — ref-based pass:**
+At each junction, collect candidates that share the same non-empty `ref` value.
+Pick the straightest such pair. Merge if deviation from 180° ≤ 45°.
+Tunnel rule applies. Traffic circle segments are never merged.
+Repeat until no new ref-based merges occur.
+
+**Phase 2 — angle-based pass:**
+Runs on all remaining segments after Phase 1.
+Uses the standard ≤ 10° tolerance with no ref filter.
+All existing junction rules apply (2-line, T, Y, X, 5+).
+Repeat until convergence.
 
 ### Attribute rule (clarified)
 
@@ -191,17 +226,22 @@ Save to `intermediate_data/OSM_roads_merge_paralle_circle.shp`.
 ## Part 5 — Remove Short Roads
 **Output:** `final/OSM_roads_clean.shp`
 
-### Rule (clarified)
+### Rules (clarified)
 
-Remove any road segment that meets **both** conditions:
+**Rule 1 — Dead-end stubs:** Remove any road segment that meets **both** conditions:
 
 1. Has **exactly 1** connection point with the rest of the network —
    meaning one endpoint touches another road's endpoint or interior,
    but the other endpoint connects to nothing (dead-end stub).
 2. Is shorter than **100 m**.
 
-Roads with 0 connections (isolated), or 2+ connections (through-roads),
-are kept regardless of length.
+**Rule 2 — Isolated segments:** Remove any road segment that meets **both** conditions:
+
+1. Has **0** connections — neither endpoint touches any other road.
+2. Is shorter than **200 m**.
+
+Roads with 2+ connections (through-roads) are kept regardless of length.
+Isolated roads ≥ 200 m and dead-end stubs ≥ 100 m are also kept.
 
 ### After processing
 

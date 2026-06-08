@@ -47,3 +47,45 @@ OSM Data/roads_OSM.sbx
 OSM Data/roads_OSM.shp
 OSM Data/roads_OSM.shp.xml
 OSM Data/roads_OSM.shx
+__pycache__/road_pipeline.cpython-313.pyc
+example data/traffic_circles_for_example_fix.cpg
+example data/traffic_circles_for_example_fix.dbf
+example data/traffic_circles_for_example_fix.prj
+example data/traffic_circles_for_example_fix.sbn
+example data/traffic_circles_for_example_fix.sbx
+example data/traffic_circles_for_example_fix.shp
+example data/traffic_circles_for_example_fix.shp.xml
+example data/traffic_circles_for_example_fix.shx
+example data/traffic_circles_for_example.cpg
+example data/traffic_circles_for_example.dbf
+example data/traffic_circles_for_example.prj
+example data/traffic_circles_for_example.sbn
+example data/traffic_circles_for_example.sbx
+example data/traffic_circles_for_example.shp
+example data/traffic_circles_for_example.shp.xml
+example data/traffic_circles_for_example.shx
+intermediate_data/deleted_part1.shp
+intermediate_data/deleted_part1.shx
+intermediate_data/deleted_part2.cpg
+intermediate_data/deleted_part2.dbf
+intermediate_data/deleted_part2.prj
+intermediate_data/deleted_part2.shp
+intermediate_data/deleted_part2.shx
+intermediate_data/deleted_part3.cpg
+intermediate_data/deleted_part3.dbf
+intermediate_data/deleted_part3.prj
+intermediate_data/deleted_part3.shp
+intermediate_data/deleted_part3.shx
+intermediate_data/deleted_part4.cpg
+intermediate_data/deleted_part4.dbf
+intermediate_data/deleted_part4.prj
+intermediate_data/deleted_part4.shp
+intermediate_data/deleted_part4.shx
+intermediate_data/deleted_part5.cpg
+intermediate_data/deleted_part5.dbf
+intermediate_data/deleted_part5.prj
+intermediate_data/deleted_part5.shp
+intermediate_data/deleted_part5.shx
+intermediate_data/deleted_part1.cpg
+intermediate_data/deleted_part1.dbf
+intermediate_data/deleted_part1.prj

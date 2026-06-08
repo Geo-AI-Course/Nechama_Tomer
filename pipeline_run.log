@@ -1,0 +1,24 @@
+
+====================================================================
+  OSM Road Network Pipeline — 5-part workflow
+====================================================================
+
+[Part 1] Preprocess
+  Loading: OSM Data/roads_OSM.shp
+  Loaded 501,657 features  CRS=EPSG:4326
+  Reprojected -> EPSG:32636
+  After geometry fix: 501,657 LineStrings
+  Removing 9,941 link-type + 12 busway
+  Detected 10,619 traffic circles (13,655 segments, 82 autocompleted)
+  class distribution: {'Residential': np.int64(265555), 'Paths': np.int64(107374), 'Track': np.int64(70754), 'traffic circle': np.int64(13737), 'Highway': np.int64(13117), 'Other': np.int64(12373), 'Bike': np.int64(8876)}
+  Remaining: 491,786  |  Removed: 9,871  |  Merged: 0  |  Change: -2.0%
+  Saved 491,786 features -> intermediate_data\OSM_roads_preprocess.shp
+  Saved 9,953 deleted features -> intermediate_data\deleted_part1.shp
+
+[Part 2] Merge lines
+  Phase ref pass 1: merged 6,487 pairs (485,299 features remaining)
+  Phase ref pass 2: merged 3,659 pairs (481,640 features remaining)
+  Phase ref pass 3: merged 1,722 pairs (479,918 features remaining)
+  Phase ref pass 4: merged 789 pairs (479,129 features remaining)
+  Phase ref pass 5: merged 340 pairs (478,789 features remaining)
+  Phase ref pass 6: merged 147 pairs (478,642 features remaining)
