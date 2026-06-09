@@ -48,19 +48,28 @@ If both roads have the same class, the longer road's attributes are kept.
 
 4. **Detect traffic circles:**
    - Build a graph of line endpoints.
-   - **Single-segment closed rings** (segments where start == end) are
-     evaluated first: compute Q and r directly from the enclosed polygon.
-     If `Q ≥ 0.90` AND `r ≤ 50 m`, tag that segment as `"traffic circle"`.
-     (OSM often stores a complete roundabout as one self-closing way.)
-   - For remaining open-arc segments, trace connected components to find
-     closed multi-segment loops. At each junction, the next segment chosen is
-     the one whose far endpoint is closest to the loop origin — this "heads
-     home" and traces the tightest (most circular) path deterministically.
-   - For each candidate loop compute:
-     - Isoperimetric quotient: `Q = 4π × area / perimeter²`
-     - Bounding-circle radius: `r = sqrt(area / π)`
-   - If `Q ≥ 0.90` AND `r ≤ 50 m`, set `class = "traffic circle"` for all
-     segments in that loop.
+   - A candidate qualifies as a traffic circle when both:
+     - Isoperimetric quotient: `Q = 4π × area / perimeter² ≥ 0.90`
+     - Bounding-circle radius: `r = sqrt(area / π) ≤ 50 m`
+   - Detection runs in three passes:
+     - **Pass 1 — Single-segment closed rings** (segments where start == end):
+       compute Q and r directly from the enclosed polygon. (OSM often stores a
+       complete roundabout as one self-closing way.)
+     - **Pass 2 — Multi-segment closed loops:** for the remaining open-arc
+       segments, trace connected components to find closed loops. At each
+       junction, the next segment chosen is the one whose far endpoint is closest
+       to the loop origin — this "heads home" and traces the tightest (most
+       circular) path deterministically. Test Q and r on the loop's convex hull.
+     - **Pass 3 — Near-complete open arcs:** chains whose remaining gap is less
+       than **12.5 % of the full circumference** (`gap / (arc_length + gap) < 0.125`).
+       The gap is bridged with a **fitted circular arc** (centre = convex-hull
+       centroid, radius interpolated between the two free ends) so the closure
+       continues the circular curvature rather than cutting a straight chord
+       across the gap. Test Q and r on the completed shape.
+   - **Output as a single feature:** each detected circle is emitted as **one
+     merged line feature** — its arc segments (plus the fitted closing arc for
+     near-complete circles) are stitched into a single line, tagged
+     `class = "traffic circle"`, and the source segments are removed.
    - Loops of 1 to 10 segments are typical; any count is allowed.
 
 5. Save to `intermediate_data/OSM_roads_preprocess.shp`.
@@ -207,7 +216,8 @@ central point.
 
 ### Steps
 
-For each traffic circle (group of connected `class = "traffic circle"` segments):
+For each traffic circle (a single merged `class = "traffic circle"` line feature
+from Part 1; any group of connected such segments is still tolerated):
 
 1. Compute the **centroid** of the circle geometry as the connection point.
 2. Find all road segments that intersect or touch the circle geometry
@@ -276,3 +286,4 @@ python road_pipeline.py --shp input.shp --crs 32636 --out final/output.shp
 | "1 intersection point" in Part 5 | Roads that connect to the network at **exactly 1 endpoint** (dead-end stubs). |
 | Input CRS / coordinate system | CLI accepts `--crs` EPSG code; default is 32636 (UTM Zone 36N). |
 | Y-split scenario in Part 3 | A divided highway fork: two mirrored branches sharing a common stem endpoint, diverging in similar directions. Extend the stem, delete both arms. |
+| Traffic circle geometry output | Each detected circle is merged into **one** line feature; near-complete circles are closed with a **fitted circular arc** (continuing the curve), not a straight chord. |
