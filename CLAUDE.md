@@ -36,7 +36,7 @@ All geometry work runs in a user-specified projected CRS (default EPSG:32636 UTM
 
 **Part 3 `part3_parallel_roads`** — Scans spatially nearby pairs via `sindex`, checks bearing similarity (≤ 20°) and midpoint lateral distance (≤ 15 m). Rule 1: different class ranks → delete lower rank. Rule 2: same rank + ≥ 50% of shorter road within 10 m → `_make_centerline`. Rule 3: same rank, not close → keep longer. Then `_handle_y_splits` detects fork arms (two segs sharing an endpoint with ≤ 30° bearing difference) and extends the incoming stem to bridge them.
 
-**Part 4 `part4_traffic_circles`** — Groups traffic circle segments into circles via `_connected_components`, computes each circle's centroid, extends connecting roads' nearest endpoint to the centroid, then deletes all `class = "traffic circle"` segments.
+**Part 4 `part4_traffic_circles`** — Groups traffic circle segments into circles via `_connected_components`, computes each circle's centroid, extends connecting roads' nearest endpoint to the centroid, then deletes all `class = "traffic circle"` segments. After connecting, `_merge_through_at_points` merges straight through-road pairs (X / + / T) at each centroid: direction is judged by each road's general heading via `_bearing_general` (a vertex `TC_MERGE_LOOKAHEAD` ≈ 3 in from the centre, to ignore the roundabout-entry kink), then the standard `MERGE_ANGLE_TOL` (10°) straight-through rule applies, reusing `_best_pair`/`_merge_geoms` and the Part 2 tunnel/class-rank winner rules.
 
 **Part 5 `part5_short_roads`** — Removes segments shorter than 100 m that have exactly 1 network connection (dead-end stubs, one endpoint free).
 

@@ -69,6 +69,8 @@ PARALLEL_SNAP_TO_JN_M = 5.0   # metres — prefer existing junction within this 
 
 FORK_BEARING_TOL = 30.0  # degrees — arms of a Y-split share bearing within this
 
+TC_MERGE_LOOKAHEAD = 3   # vertices in from the circle centre used to gauge a road's general direction
+
 SHORT_ROAD_M     = 100.0  # metres — dead-end removal threshold
 ISOLATED_ROAD_M  = 200.0  # metres — isolated (0-connection) removal threshold
 TC_GAP_FRACTION  = 0.125  # max gap / total perimeter for near-complete circle autocompletion
@@ -150,6 +152,27 @@ def _bearing_toward_jn(line: LineString, which_end: str) -> float:
     if which_end == "end":
         return _local_bearing(line, "end")
     return (_local_bearing(line, "start") + 180) % 360
+
+
+def _bearing_general(line: LineString, which_end: str,
+                     lookahead: int = TC_MERGE_LOOKAHEAD) -> float:
+    """Bearing pointing INTO the junction, judged by the road's GENERAL heading.
+
+    Like `_bearing_toward_jn`, but measured from a vertex `lookahead` steps in from
+    the junction endpoint (clamped for short lines) rather than the immediately
+    adjacent one.  This smooths out the kink where a road bends into a roundabout,
+    so two opposite through-road arms read as ~180° apart.
+    """
+    c = list(line.coords)
+    if len(c) < 2:
+        return 0.0
+    if which_end == "end":
+        j = c[-1]
+        k = c[max(0, len(c) - 1 - lookahead)]
+    else:
+        j = c[0]
+        k = c[min(len(c) - 1, lookahead)]
+    return math.degrees(math.atan2(j[0] - k[0], j[1] - k[1])) % 360
 
 
 # ── Geometry helpers ───────────────────────────────────────────────────────────
@@ -969,6 +992,94 @@ def _handle_y_splits(gdf: gpd.GeoDataFrame):
 # Part 4 — Traffic circle connections
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _merge_through_at_points(df: gpd.GeoDataFrame, centroids: list):
+    """Merge straight-through pairs (X / + / T) at the given junction points.
+
+    Used after Part 4 extends connecting roads to a traffic circle's centre: the
+    roads now converge on one point like a crossroads.  At each centre point, the
+    straightest opposite pair — judged by each road's GENERAL heading
+    (`_bearing_general`, ~3 vertices in from the centre) and the 10° rule
+    (`MERGE_ANGLE_TOL`) — is merged into one through-road, using the same pairing
+    (`_best_pair`), concatenation (`_merge_geoms`), tunnel and class-rank winner
+    rules as the Part 2 merge.
+
+    Iterates until no further pair merges, so a 4-way `+` collapses both opposite
+    pairs (after the first merge the centre becomes an interior vertex, leaving the
+    other two arms to merge next pass) and 5+-arm centres collapse repeatedly.
+    """
+    df = df.reset_index(drop=True).copy()
+    centre_keys = {_rpt(c) for c in centroids}
+    total_merged = 0
+
+    while True:
+        df = df.reset_index(drop=True)
+
+        jmap: dict = defaultdict(list)
+        for i in range(len(df)):
+            c = list(df.iloc[i].geometry.coords)
+            jmap[_rpt(c[0])].append((i, "start"))
+            jmap[_rpt(c[-1])].append((i, "end"))
+
+        merged_this: set = set()
+        new_rows: list   = []
+
+        for pt in centre_keys:
+            endpoints = jmap.get(pt, [])
+            seen_ids: dict = {}
+            for idx, which in endpoints:
+                if idx not in seen_ids:
+                    seen_ids[idx] = which
+            seg_ids = [s for s in seen_ids if s not in merged_this]
+            if len(seg_ids) < 2:
+                continue
+
+            candidates = [
+                (s, seen_ids[s],
+                 _bearing_general(df.iloc[s].geometry, seen_ids[s]))
+                for s in seg_ids
+            ]
+
+            result = _best_pair(candidates)
+            if result is None:
+                continue
+
+            i_idx, i_which, j_idx, j_which, diff = result
+            if diff > MERGE_ANGLE_TOL:
+                continue
+
+            tun_i = str(df.iloc[i_idx].get("tunnel", "F") or "F").upper() == "T"
+            tun_j = str(df.iloc[j_idx].get("tunnel", "F") or "F").upper() == "T"
+            if tun_i != tun_j:
+                continue
+
+            merged_geom = _merge_geoms(df.iloc[i_idx].geometry, i_which,
+                                       df.iloc[j_idx].geometry, j_which)
+            if merged_geom is None:
+                continue
+
+            row_i = df.iloc[i_idx]
+            row_j = df.iloc[j_idx]
+            ri = CLASS_RANK.get(row_i.get("class", "Other"), 5)
+            rj = CLASS_RANK.get(row_j.get("class", "Other"), 5)
+            winner = row_i.copy() if ri <= rj else row_j.copy()
+            winner["geometry"] = merged_geom
+            new_rows.append(winner)
+
+            merged_this.add(i_idx)
+            merged_this.add(j_idx)
+
+        if not merged_this:
+            break
+
+        survivors = df[~df.index.isin(merged_this)].copy()
+        new_gdf   = gpd.GeoDataFrame(new_rows, crs=df.crs, geometry="geometry")
+        df        = pd.concat([survivors, new_gdf],
+                              ignore_index=True).reset_index(drop=True)
+        total_merged += len(merged_this) // 2
+
+    return df, total_merged
+
+
 def part4_traffic_circles(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     df    = gdf.reset_index(drop=True).copy()
     is_tc = df["class"] == "traffic circle"
@@ -977,7 +1088,7 @@ def part4_traffic_circles(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
     if len(tc) == 0:
         print("  No traffic circles found")
-        return df, gpd.GeoDataFrame(columns=df.columns, crs=df.crs)
+        return df, 0, gpd.GeoDataFrame(columns=df.columns, crs=df.crs)
 
     # Group TC segments into individual circles by connectivity
     adj_tc: dict = defaultdict(set)
@@ -1001,11 +1112,13 @@ def part4_traffic_circles(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
           f"({len(tc):,} segments)")
 
     roads_sindex = roads.sindex
+    centroids: list = []
 
     for comp in components:
         circle_geoms = [tc.iloc[k].geometry for k in comp]
         circle_union = unary_union(circle_geoms)
         centroid     = circle_union.centroid
+        centroids.append((centroid.x, centroid.y))
         buf          = circle_union.buffer(1.0)
 
         for road_idx in roads_sindex.query(buf):
@@ -1026,8 +1139,14 @@ def part4_traffic_circles(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
     n_tc = len(tc)
     print(f"  Removed {n_tc:,} traffic circle segments")
+
+    # Merge straight-through pairs (X / + / T) at the circle centres
+    roads, n_merged = _merge_through_at_points(roads, centroids)
+    if n_merged:
+        print(f"  Centre X/+ merge: {n_merged:,} through-road pair(s) merged")
+
     roads = _add_lengths(roads)
-    return roads.reset_index(drop=True), tc
+    return roads.reset_index(drop=True), n_merged, tc
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1113,8 +1232,9 @@ def main():
 
     print("\n[Part 4] Traffic circle connections")
     n0 = len(gdf)
-    gdf, deleted4 = part4_traffic_circles(gdf)
-    _record("4. Traffic circles removed", n0, len(gdf))
+    gdf, n_merged4, deleted4 = part4_traffic_circles(gdf)
+    _record("4. Traffic circles removed", n0, len(gdf),
+            n_removed=max(0, n0 - len(gdf) - n_merged4), n_merged=n_merged4)
     _save_intermediate(gdf, "OSM_roads_merge_paralle_circle")
     _save_deleted(deleted4, "deleted_part4")
 

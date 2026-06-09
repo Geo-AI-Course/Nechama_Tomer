@@ -95,3 +95,5 @@ Final/example_clean.dbf
 Final/example_clean.prj
 Final/example_clean.shp
 Final/example_clean.shx
+docs/y_intersection_handling.png
+make_y_diagram.py

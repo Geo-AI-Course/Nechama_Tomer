@@ -226,6 +226,33 @@ from Part 1; any group of connected such segments is still tolerated):
    circle geometry to the centroid (add the centroid as the new endpoint vertex).
 4. Delete all segments with `class = "traffic circle"`.
 
+### Merge through-roads at the centre (clarified)
+
+Once the approaching roads all meet at the centroid they form a crossroads, so
+merge the straight **through-road** pairs there using the same junction logic as
+Part 2, with two differences:
+
+- **Direction is judged by each road's general heading, not its first segment.**
+  Measure the toward-junction bearing from a vertex about **3 vertices in from the
+  centre** (rather than the immediately adjacent vertex). This ignores the short
+  kink where a road bends into the roundabout, so two genuine through-arms read as
+  ~180° apart.
+- The standard **≤ 10° straight-through tolerance** then decides each merge.
+
+Apply this to every centre point, treating each like an ordinary junction:
+
+| Arms at the centre | Rule |
+|---|---|
+| 2 | Merge if deviation from 180° ≤ 10° |
+| 3 — T (one pair within 10°) | Merge the straightest pair; the third arm stays as a branch |
+| 3 — Y (no pair within 10°) | Do **not** merge any pair |
+| 4 — X or + | Merge both opposite pairs, producing a proper crossroads |
+| 5 or more | Repeatedly merge any straight-through pair until none remain |
+
+The **hierarchy** and **tunnel** rules from Part 2 apply unchanged: the higher-rank
+class supplies the merged attributes, and `tunnel = T` segments never merge with
+non-tunnel segments.
+
 ### After processing
 
 Recalculate `length_m` and `length_km`.
@@ -287,3 +314,4 @@ python road_pipeline.py --shp input.shp --crs 32636 --out final/output.shp
 | Input CRS / coordinate system | CLI accepts `--crs` EPSG code; default is 32636 (UTM Zone 36N). |
 | Y-split scenario in Part 3 | A divided highway fork: two mirrored branches sharing a common stem endpoint, diverging in similar directions. Extend the stem, delete both arms. |
 | Traffic circle geometry output | Each detected circle is merged into **one** line feature; near-complete circles are closed with a **fitted circular arc** (continuing the curve), not a straight chord. |
+| Merging at the traffic-circle centre (Part 4) | After connecting roads to the centroid, merge straight through-road pairs (X / + / T) there. Direction is judged by each road's **general heading** (~3 vertices in from the centre, to ignore the roundabout-entry kink), then the standard **≤ 10°** straight-through rule applies. |

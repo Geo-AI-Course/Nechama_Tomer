@@ -75,7 +75,9 @@ Input shapefile
       ▼
 [Part 4] Traffic circles ────── find roads intersecting each traffic circle;
       │                         extend those roads to meet at the optimal
-      │                         central connection point; remove circle geometry;
+      │                         central connection point; merge straight
+      │                         through-road pairs (X / + / T) at the centre;
+      │                         remove circle geometry;
       │                         recalculate length_m, length_km
       │                         → intermediate_data/OSM_roads_merge_paralle_circle.shp
       ▼
@@ -161,6 +163,33 @@ Tunnels (`tunnel = T`) are never merged with non-tunnel segments in either phase
 | Two roads with different class ranks | Keep the higher-rank road; delete the lower-rank road |
 | Two roads with the same class rank | Keep the longer road; delete the shorter road |
 | Y-shaped intersection where both branches mirror each other | Extend the longest (base) road to the perpendicular road or traffic circle |
+
+---
+
+## Traffic circle connections (Part 4)
+
+Each detected traffic circle is collapsed to a single point: its connecting roads are
+extended so their nearest endpoint meets the circle **centroid**, then the circle geometry
+is removed.
+
+Once the roads converge on the centre they form a crossroads, so a final step merges the
+straight **through-road** pairs there — the same junction logic as Part 2, with two
+adjustments:
+
+- **Direction is judged by each road's *general* heading**, measured from a vertex about
+  **3 vertices in from the centre** (`TC_MERGE_LOOKAHEAD`), so the bend where a road curves
+  into the roundabout does not distort its bearing.
+- The standard **±10° straight-through rule** then decides each merge.
+
+| Arms at the centre | Merge behaviour |
+|--------------------|-----------------|
+| **2** | Merge if within ±10° of straight |
+| **3 (T / Y)** | Merge the straightest pair if within ±10°; the third arm stays as a branch. A true Y (no pair within ±10°) is left untouched |
+| **4 (X / +)** | Merge both opposite pairs, yielding a proper crossroads |
+| **5 +** | Merge any straight-through pair repeatedly until none remain |
+
+Hierarchy and tunnel rules match Part 2: the higher-rank class supplies the winner's
+attributes, and tunnel/non-tunnel segments are never merged together.
 
 ---
 
