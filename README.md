@@ -81,7 +81,9 @@ Input shapefile
       │                         recalculate length_m, length_km
       │                         → intermediate_data/OSM_roads_merge_paralle_circle.shp
       ▼
-[Part 5] Remove short roads ─── Rule 1: drop dead-end stubs (1 connection, < 100 m);
+[Part 5] Remove short roads ─── connection = endpoint touches another road
+                                (endpoint OR interior / T-bone, within 0.5 m);
+                                Rule 1: drop dead-end stubs (1 connection, < 100 m);
                                 Rule 2: drop isolated roads (0 connections, < 200 m);
                                 recalculate length_m, length_km
                                 → final/<output>.shp

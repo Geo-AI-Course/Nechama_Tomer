@@ -74,6 +74,7 @@ TC_MERGE_LOOKAHEAD = 3   # vertices in from the circle centre used to gauge a ro
 
 SHORT_ROAD_M     = 100.0  # metres — dead-end removal threshold
 ISOLATED_ROAD_M  = 200.0  # metres — isolated (0-connection) removal threshold
+TOUCH_TOL_M      = 0.5    # metres — max distance for a road endpoint to count as touching another road (T-bone included)
 TC_GAP_FRACTION  = 0.125  # max gap / total perimeter for near-complete circle autocompletion
 INTERMEDIATE_DIR = "intermediate_data"
 
@@ -1292,22 +1293,28 @@ def part4_traffic_circles(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 def part5_short_roads(gdf: gpd.GeoDataFrame):
     df = gdf.reset_index(drop=True).copy()
 
-    # For each endpoint, count how many OTHER segments share it
-    ep_segs: dict = defaultdict(set)
-    for i in range(len(df)):
-        c = list(df.iloc[i].geometry.coords)
-        ep_segs[_rpt(c[0])].add(i)
-        ep_segs[_rpt(c[-1])].add(i)
+    # An endpoint counts as connected when it TOUCHES any other road — its
+    # endpoint OR its interior (a T-bone) — within TOUCH_TOL_M.  Detected
+    # geometrically via the spatial index, not by exact endpoint matching.
+    sindex = df.sindex
+
+    def _endpoint_connected(i: int, xy) -> bool:
+        pt = Point(xy)
+        for j in sindex.query(pt.buffer(TOUCH_TOL_M)):
+            if int(j) == i:
+                continue
+            if df.iloc[j].geometry.distance(pt) <= TOUCH_TOL_M:
+                return True
+        return False
 
     drop_stub: set = set()
     drop_isolated: set = set()
     for i in range(len(df)):
-        length = df.iloc[i].geometry.length
-        c = list(df.iloc[i].geometry.coords)
-        s, e = _rpt(c[0]), _rpt(c[-1])
-        conn_s = len(ep_segs[s] - {i})
-        conn_e = len(ep_segs[e] - {i})
-        connections = (conn_s > 0) + (conn_e > 0)
+        geom = df.iloc[i].geometry
+        length = geom.length
+        c = list(geom.coords)
+        connections = (int(_endpoint_connected(i, c[0]))
+                       + int(_endpoint_connected(i, c[-1])))
         # Rule 1: exactly 1 connection (dead-end stub) AND length < 100 m
         if connections == 1 and length < SHORT_ROAD_M:
             drop_stub.add(i)

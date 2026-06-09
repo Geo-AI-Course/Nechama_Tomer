@@ -38,7 +38,7 @@ All geometry work runs in a user-specified projected CRS (default EPSG:32636 UTM
 
 **Part 4 `part4_traffic_circles`** — Groups traffic circle segments into circles via `_connected_components`, computes each circle's centroid, extends connecting roads' nearest endpoint to the centroid, then deletes all `class = "traffic circle"` segments. After connecting, `_merge_through_at_points` merges straight through-road pairs (X / + / T) at each centroid: direction is judged by each road's general heading via `_bearing_general` (a vertex `TC_MERGE_LOOKAHEAD` ≈ 3 in from the centre, to ignore the roundabout-entry kink), then the standard `MERGE_ANGLE_TOL` (10°) straight-through rule applies, reusing `_best_pair`/`_merge_geoms` and the Part 2 tunnel/class-rank winner rules.
 
-**Part 5 `part5_short_roads`** — Removes segments shorter than 100 m that have exactly 1 network connection (dead-end stubs, one endpoint free).
+**Part 5 `part5_short_roads`** — Removes segments shorter than 100 m that have exactly 1 network connection (dead-end stubs, one endpoint free). Connectivity is geometric: an endpoint counts as connected when it **touches** any other road's endpoint *or* interior (a T-bone), detected via the spatial index within `TOUCH_TOL_M` (0.5 m) — not by exact endpoint matching.
 
 ### Key shared utilities (in road_pipeline.py)
 
@@ -80,5 +80,5 @@ Whenever `road_pipeline.py` or `prompt_main_new_fixed.md` is updated, `README.md
 - **Hierarchy vs length:** class rank always wins when choosing attributes during a merge; length only breaks ties within the same class.
 - **Tunnel rule:** `tunnel = T` segments merge only with other `tunnel = T` segments.
 - **Parallel threshold:** 50% of the shorter road's sampled points must be within 10 m for centerline collapse.
-- **Short road rule:** removes roads with exactly 1 network endpoint connection (not 0, not 2+).
+- **Short road rule:** removes roads with exactly 1 network connection (not 0, not 2+). A connection means an endpoint **touches** another road's endpoint or interior (T-bone included), tested geometrically within `TOUCH_TOL_M` (0.5 m).
 - The full clarified spec is in `prompt_main_new_fixed.md`.
