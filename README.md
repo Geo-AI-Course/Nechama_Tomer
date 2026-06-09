@@ -118,9 +118,9 @@ Detection runs in three passes:
 
 1. **Self-closing single segments** (start == end) — detected directly from the enclosed polygon area.
 2. **Multi-segment closed loops** — traced via a "head-home" heuristic that follows connected segments back to the chain's origin.
-3. **Near-complete open arcs** — chains whose remaining gap is less than **12.5 % of the full circumference** (`gap / (arc_length + gap) < 0.125`). A synthetic closing segment is inserted to complete the ring; the entire chain (plus closing segment) is then tagged as a traffic circle.
+3. **Near-complete open arcs** — chains whose remaining gap is less than **12.5 % of the full circumference** (`gap / (arc_length + gap) < 0.125`). The gap is bridged with a **fitted circular arc** (circle centre from the convex-hull centroid, radius interpolated between the two free ends) so the closure continues the circular curvature rather than cutting a straight chord across the gap.
 
-Detected traffic circles are tagged `class = "traffic circle"` and handled in Part 4.
+Each detected circle is emitted as a **single merged line feature** (the arc segments — plus the fitted closing arc for near-complete circles — are stitched into one line via `linemerge`, with a rounded-endpoint fallback). The merged feature is tagged `class = "traffic circle"` and handled in Part 4.
 
 ---
 

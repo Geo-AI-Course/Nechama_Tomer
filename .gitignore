@@ -90,3 +90,8 @@ intermediate_data/deleted_part1.cpg
 intermediate_data/deleted_part1.dbf
 intermediate_data/deleted_part1.prj
 pipeline_run.log
+Final/example_clean.cpg
+Final/example_clean.dbf
+Final/example_clean.prj
+Final/example_clean.shp
+Final/example_clean.shx

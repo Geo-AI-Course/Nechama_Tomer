@@ -40,47 +40,47 @@
   Saved 205,936 deleted features -> intermediate_data\deleted_part2.shp
 
 [Part 3] Parallel roads
-  Y-split: removed 4,608 fork arms
-  Phase angle pass 1: merged 856 pairs (343,542 features remaining)
-  Phase angle pass 2: merged 37 pairs (343,505 features remaining)
-  Phase angle pass 3: merged 1 pairs (343,504 features remaining)
+  Y-split: removed 2,414 fork arms
+  Phase angle pass 1: merged 1,473 pairs (345,010 features remaining)
+  Phase angle pass 2: merged 37 pairs (344,973 features remaining)
+  Phase angle pass 3: merged 1 pairs (344,972 features remaining)
   Phase angle: converged after 4 pass(es)
-  Post-extension merge: 894 additional pair(s) merged
-  Remaining: 343,504  |  Removed: 45,314  |  Merged: 894  |  Change: -11.7%
-  Saved 343,504 features -> intermediate_data\OSM_roads_merge_paralle.shp
-  Saved 44,420 deleted features -> intermediate_data\deleted_part3.shp
+  Post-extension merge: 1,511 additional pair(s) merged
+  Remaining: 344,972  |  Removed: 43,846  |  Merged: 1,511  |  Change: -11.3%
+  Saved 344,972 features -> intermediate_data\OSM_roads_merge_paralle.shp
+  Saved 42,335 deleted features -> intermediate_data\deleted_part3.shp
 
 [Part 4] Traffic circle connections
-  Processing 10,609 traffic circle(s) (13,737 segments)
+  Processing 10,614 traffic circle(s) (13,737 segments)
   Removed 13,737 traffic circle segments
-  Remaining: 329,767  |  Removed: 13,737  |  Merged: 0  |  Change: -4.0%
-  Saved 329,767 features -> intermediate_data\OSM_roads_merge_paralle_circle.shp
+  Remaining: 331,235  |  Removed: 13,737  |  Merged: 0  |  Change: -4.0%
+  Saved 331,235 features -> intermediate_data\OSM_roads_merge_paralle_circle.shp
   Saved 13,737 deleted features -> intermediate_data\deleted_part4.shp
 
 [Part 5] Remove short roads
-  Removed 34,172 short dead-end roads (< 100 m)
-  Removed 138,298 isolated roads (< 200 m)
-  Remaining: 157,297  |  Removed: 172,470  |  Merged: 0  |  Change: -52.3%
-  Saved 172,470 deleted features -> intermediate_data\deleted_part5.shp
+  Removed 35,650 short dead-end roads (< 100 m)
+  Removed 137,728 isolated roads (< 200 m)
+  Remaining: 157,857  |  Removed: 173,378  |  Merged: 0  |  Change: -52.3%
+  Saved 173,378 deleted features -> intermediate_data\deleted_part5.shp
 
 [Output] Save -> final/OSM_roads_clean.shp
-  Saved 157,297 features -> C:\Users\nechamab\Documents\GeoAI course\mini project\Nechama_Tomer\Final\OSM_roads_clean.shp
+  Saved 157,857 features -> C:\Users\nechamab\Documents\GeoAI course\mini project\Nechama_Tomer\Final\OSM_roads_clean.shp
 
 ====================================================================
   PIPELINE SUMMARY REPORT
 ====================================================================
   Input features   : 501,657
-  Output features  : 157,297
-  Total removed    : 241,392
-  Total merged     : 103,862
+  Output features  : 157,857
+  Total removed    : 240,832
+  Total merged     : 104,479
 
   Part                                            After   Removed   Merged    Chg%
   -------------------------------------------- -------- --------- -------- -------
   1. Preprocess (links/busway removed)          491,786     9,871        0 -   2.0%
   2. Merge lines                                388,818         0  102,968 -  20.9%
-  3. Parallel roads                             343,504    45,314      894 -  11.7%
-  4. Traffic circles removed                    329,767    13,737        0 -   4.0%
-  5. Short dead-end roads removed               157,297   172,470        0 -  52.3%
+  3. Parallel roads                             344,972    43,846    1,511 -  11.3%
+  4. Traffic circles removed                    331,235    13,737        0 -   4.0%
+  5. Short dead-end roads removed               157,857   173,378        0 -  52.3%
 ====================================================================
   Pipeline complete.
 

@@ -29,7 +29,7 @@ from pathlib import Path
 import geopandas as gpd
 import pandas as pd
 from shapely.geometry import LineString, Point, Polygon
-from shapely.ops import nearest_points, unary_union
+from shapely.ops import nearest_points, unary_union, linemerge
 
 warnings.filterwarnings("ignore")
 
@@ -163,6 +163,73 @@ def _make_centerline(a: LineString, b: LineString, n: int = 100) -> LineString:
     pts_b = [b.interpolate(i / (n - 1), normalized=True) for i in range(n)]
     return LineString([((p.x + q.x) / 2, (p.y + q.y) / 2)
                        for p, q in zip(pts_a, pts_b)]).simplify(1.0)
+
+
+def _stitch_chain(geoms: list) -> LineString:
+    """Concatenate LineStrings into one, matching rounded endpoints.
+
+    Fallback for when shapely's linemerge cannot join coincident-but-not-exact
+    vertices.  Uses the same orientation logic as `_merge_geoms`.
+    """
+    remaining = list(geoms)
+    coords = list(remaining.pop(0).coords)
+    changed = True
+    while remaining and changed:
+        changed = False
+        for idx, g in enumerate(remaining):
+            gc = list(g.coords)
+            if _rpt(coords[-1]) == _rpt(gc[0]):
+                coords += gc[1:]
+            elif _rpt(coords[-1]) == _rpt(gc[-1]):
+                coords += gc[-2::-1]
+            elif _rpt(coords[0]) == _rpt(gc[-1]):
+                coords = gc[:-1] + coords
+            elif _rpt(coords[0]) == _rpt(gc[0]):
+                coords = gc[:0:-1] + coords
+            else:
+                continue
+            remaining.pop(idx)
+            changed = True
+            break
+    return LineString(coords)
+
+
+def _merge_circle(geoms: list) -> LineString:
+    """Merge the arc segments of one traffic circle into a single line.
+
+    Prefers shapely's linemerge (handles ordering/direction and yields a
+    closed ring for a full loop); falls back to `_stitch_chain` when endpoints
+    are coincident only after rounding.
+    """
+    if len(geoms) == 1:
+        return geoms[0]
+    merged = linemerge(geoms)
+    if merged.geom_type == "LineString":
+        return merged
+    parts = list(merged.geoms) if merged.geom_type == "MultiLineString" else geoms
+    return _stitch_chain(parts)
+
+
+def _arc_between(center, p_start, p_end, n: int = 24) -> LineString:
+    """Circular arc from p_start to p_end around center.
+
+    Sweeps the shortest signed angle (the small remaining gap) and interpolates
+    the radius linearly between the two endpoints so the arc meets both free
+    ends exactly while continuing the circular curvature.
+    """
+    cx, cy = center
+    a0 = math.atan2(p_start[1] - cy, p_start[0] - cx)
+    a1 = math.atan2(p_end[1] - cy, p_end[0] - cx)
+    d  = (a1 - a0 + math.pi) % (2 * math.pi) - math.pi
+    r0 = math.hypot(p_start[0] - cx, p_start[1] - cy)
+    r1 = math.hypot(p_end[0] - cx, p_end[1] - cy)
+    pts = []
+    for k in range(n + 1):
+        t   = k / n
+        ang = a0 + d * t
+        r   = r0 + (r1 - r0) * t
+        pts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
+    return LineString(pts)
 
 
 def _add_lengths(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -313,8 +380,7 @@ def _detect_traffic_circles(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         ep[i] = (s, e)
 
     visited: set = set()
-    tc_segs: set = set()
-    n_circles = 0
+    circles: list = []   # each: {"members": [seg idx, ...], "close_geom": LineString | None}
 
     # Pass 1: self-closed single-segment rings (start == end).
     # OSM often stores a complete roundabout as one closed way.
@@ -338,9 +404,8 @@ def _detect_traffic_circles(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         Q      = 4 * math.pi * poly.area / (perim ** 2)
         radius = math.sqrt(poly.area / math.pi)
         if Q >= TC_CIRCULARITY_THR and radius <= TC_MAX_RADIUS_M:
-            tc_segs.add(i)
+            circles.append({"members": [i], "close_geom": None})
             visited.add(i)
-            n_circles += 1
 
     # Pass 2: multi-segment closed loops traced from open-arc endpoints.
     for i in range(len(gdf)):
@@ -368,9 +433,7 @@ def _detect_traffic_circles(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         radius = math.sqrt(hull.area / math.pi)
 
         if Q >= TC_CIRCULARITY_THR and radius <= TC_MAX_RADIUS_M:
-            for k in loop:
-                tc_segs.add(k)
-            n_circles += 1
+            circles.append({"members": list(loop), "close_geom": None})
 
         visited.update(loop)
 
@@ -378,8 +441,8 @@ def _detect_traffic_circles(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     # For each unvisited segment, trace a chain toward the start point using the
     # same "head-home" heuristic as _trace_loop.  When the remaining gap is small
     # enough, check Q and radius on the synthetically completed polygon; if both
-    # pass, tag the chain and insert a synthetic closing segment.
-    new_close_segs: list = []
+    # pass, tag the chain and bridge the gap with a fitted circular arc.
+    n_autocompleted = 0
     started: set = set()
 
     for i in range(len(gdf)):
@@ -427,25 +490,42 @@ def _detect_traffic_circles(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         started.update(chain)
 
         if found:
-            for k in chain:
-                tc_segs.add(k)
             visited.update(chain)
-            close_row = gdf.iloc[chain[0]].copy()
-            close_row["geometry"] = LineString([cur, origin])
-            close_row["class"] = "traffic circle"
-            new_close_segs.append(close_row)
-            n_circles += 1
+            # Fit the circle and bridge the gap with an arc continuing the curve,
+            # from the chain's free tip (cur) back to its free start (origin).
+            geoms      = [gdf.iloc[k].geometry for k in chain]
+            center     = unary_union(geoms).convex_hull.centroid
+            origin_xy  = list(gdf.iloc[chain[0]].geometry.coords)[0]
+            last_coords = list(gdf.iloc[chain[-1]].geometry.coords)
+            cur_xy     = (last_coords[0] if _rpt(last_coords[0]) == cur
+                          else last_coords[-1])
+            arc = _arc_between((center.x, center.y), cur_xy, origin_xy)
+            circles.append({"members": list(chain), "close_geom": arc})
+            n_autocompleted += 1
 
-    if n_circles or new_close_segs:
-        print(f"  Detected {n_circles:,} traffic circles "
-              f"({len(tc_segs):,} segments, "
-              f"{len(new_close_segs):,} autocompleted)")
-        gdf = gdf.copy()
-        if tc_segs:
-            gdf.loc[list(tc_segs), "class"] = "traffic circle"
-        if new_close_segs:
-            extra = gpd.GeoDataFrame(new_close_segs, crs=gdf.crs)
-            gdf = pd.concat([gdf, extra], ignore_index=True)
+    if circles:
+        drop_idx: set = set()
+        circle_rows: list = []
+        for circ in circles:
+            members = circ["members"]
+            geoms   = [gdf.iloc[k].geometry for k in members]
+            if circ["close_geom"] is not None:
+                geoms = geoms + [circ["close_geom"]]
+            merged_geom = _merge_circle(geoms)
+            row = gdf.iloc[members[0]].copy()
+            row["class"]    = "traffic circle"
+            row["geometry"] = merged_geom
+            circle_rows.append(row)
+            drop_idx.update(members)
+
+        print(f"  Detected {len(circles):,} traffic circles "
+              f"({len(drop_idx):,} source segments merged, "
+              f"{n_autocompleted:,} arc-closed)")
+
+        kept       = gdf[~gdf.index.isin(drop_idx)].copy()
+        circle_gdf = gpd.GeoDataFrame(circle_rows, crs=gdf.crs,
+                                      geometry="geometry")
+        gdf = pd.concat([kept, circle_gdf], ignore_index=True)
 
     return gdf
 
