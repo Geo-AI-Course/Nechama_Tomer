@@ -96,8 +96,9 @@ are possible.
   Two lines form a straight-through pair when their toward-junction bearings are
   approximately 180° apart.
 
-- **Merge tolerance (angle pass):** A pair is eligible for merging when the deviation
-  from 180° is ≤ 10°.
+- **Merge tolerance (angle pass):** A multi-road (3+) junction pair is eligible for
+  merging when the deviation from 180° is ≤ 30°. (A true 2-line junction always merges
+  regardless of angle.)
 
 - **Merge tolerance (ref pass):** A pair sharing the same non-empty `ref` value is
   eligible for merging when the deviation from 180° is ≤ 45°.
@@ -118,12 +119,14 @@ Merging runs in two sequential phases, each iterated until convergence:
 **Phase 1 — ref-based pass:**
 At each junction, collect candidates that share the same non-empty `ref` value.
 Pick the straightest such pair. Merge if deviation from 180° ≤ 45°.
+A true 2-line junction (a line touching exactly one other line) always merges
+regardless of the angle, in both phases.
 Tunnel rule applies. Traffic circle segments are never merged.
 Repeat until no new ref-based merges occur.
 
 **Phase 2 — angle-based pass:**
 Runs on all remaining segments after Phase 1.
-Uses the standard ≤ 10° tolerance with no ref filter.
+Uses the standard ≤ 30° tolerance with no ref filter.
 All existing junction rules apply (2-line, T, Y, X, 5+).
 Repeat until convergence.
 
@@ -143,11 +146,11 @@ A tunnel segment and a non-tunnel segment at the same junction are never merged.
 
 | Lines at junction | Rule |
 |---|---|
-| 2 lines | Merge if the best pair deviation ≤ 10° |
-| 3 lines — Y (no pair within 10°) | Do **not** merge any pair |
-| 3 lines — T (one pair within 10°) | Merge the pair closest to 180° |
-| 4 lines — X or + | Merge the single pair closest to 180° (within 10°) |
-| 5 or more lines | Find the pair closest to 180° (within 10°) and merge it |
+| 2 lines | Always merge, regardless of the angle (tunnel / traffic-circle rules still apply) |
+| 3 lines — Y (no pair within 30°) | Do **not** merge any pair |
+| 3 lines — T (one pair within 30°) | Merge the pair closest to 180° |
+| 4 lines — X or + | Merge the single pair closest to 180° (within 30°) |
+| 5 or more lines | Find the pair closest to 180° (within 30°) and merge it |
 
 Traffic circle segments (`class = "traffic circle"`) are **never** merged.
 
@@ -237,14 +240,18 @@ from Part 1; any group of connected such segments is still tolerated):
 
 Once the approaching roads all meet at the centroid they form a crossroads, so
 merge the straight **through-road** pairs there using the same junction logic as
-Part 2, with two differences:
+Part 2 (`_best_pair`, `_merge_geoms`, tunnel and class-rank winner rules), with two
+differences:
 
 - **Direction is judged by each road's general heading, not its first segment.**
   Measure the toward-junction bearing from a vertex about **3 vertices in from the
   centre** (rather than the immediately adjacent vertex). This ignores the short
   kink where a road bends into the roundabout, so two genuine through-arms read as
   ~180° apart.
-- The standard **≤ 10° straight-through tolerance** then decides each merge.
+- A **tighter ≤ 10° straight-through tolerance** decides each merge. Part 4 keeps
+  10° here (constant `TC_MERGE_ANGLE_TOL`), unlike Part 2's wider 30°
+  (`MERGE_ANGLE_TOL`), because the roundabout-centre arms should only collapse when
+  they are genuinely opposite.
 
 Apply this to every centre point, treating each like an ordinary junction:
 
@@ -321,4 +328,5 @@ python road_pipeline.py --shp input.shp --crs 32636 --out final/output.shp
 | Input CRS / coordinate system | CLI accepts `--crs` EPSG code; default is 32636 (UTM Zone 36N). |
 | Y-split scenario in Part 3 | A divided highway fork: two mirrored branches sharing a common stem endpoint, diverging in similar directions. Extend the stem, delete both arms. |
 | Traffic circle geometry output | Each detected circle is merged into **one** line feature; near-complete circles are closed with a **fitted circular arc** (continuing the curve), not a straight chord. |
-| Merging at the traffic-circle centre (Part 4) | After connecting roads to the centroid, merge straight through-road pairs (X / + / T) there. Direction is judged by each road's **general heading** (~3 vertices in from the centre, to ignore the roundabout-entry kink), then the standard **≤ 10°** straight-through rule applies. |
+| Merging at the traffic-circle centre (Part 4) | After connecting roads to the centroid, merge straight through-road pairs (X / + / T) there. Direction is judged by each road's **general heading** (~3 vertices in from the centre, to ignore the roundabout-entry kink), then a **tighter ≤ 10°** straight-through rule applies (`TC_MERGE_ANGLE_TOL`) — Part 4 stays at 10° even though Part 2 now uses 30°. |
+| Merge angle tolerance (Part 2) | A true 2-line junction always merges regardless of angle. A multi-road (3+) junction (T / X / + / 5+) merges its straightest pair when within **≤ 30°** of straight (`MERGE_ANGLE_TOL`); the ref-based pass uses ≤ 45°. |

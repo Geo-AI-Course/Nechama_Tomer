@@ -59,7 +59,8 @@ Input shapefile
       │                         → intermediate_data/OSM_roads_preprocess.shp
       ▼
 [Part 2] Merge lines ────────── merge contiguous segments whose endpoints
-      │                         touch at ~180° (±10° tolerance);
+      │                         touch at ~180° (±30° tolerance), and always
+      │                         merge true 2-line junctions regardless of angle;
       │                         handle 2-line, T, X/+, and multi-way junctions;
       │                         keep attributes from longest / highest-hierarchy road;
       │                         tunnels are never merged;
@@ -148,9 +149,9 @@ All remaining segments are merged using the standard angle rules below.
 |---------------|-----------------|
 | **2 lines at 1 point** | Always merge |
 | **Y intersection (3 lines)** | Do not merge |
-| **T intersection** | Merge the pair closest to 180° (within ±10°) |
-| **X / + intersection (4 lines)** | Merge the pair closest to 180° (within ±10°) |
-| **5 + lines at 1 point** | Find and merge any pair closest to 180° (within ±10°) |
+| **T intersection** | Merge the pair closest to 180° (within ±30°) |
+| **X / + intersection (4 lines)** | Merge the pair closest to 180° (within ±30°) |
+| **5 + lines at 1 point** | Find and merge any pair closest to 180° (within ±30°) |
 
 In both phases, **hierarchy always wins** when choosing attributes: the higher-rank
 class road provides the attributes. Length breaks ties within the same class.  

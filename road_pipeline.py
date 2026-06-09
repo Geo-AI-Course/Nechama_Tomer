@@ -58,8 +58,9 @@ TC_CIRCULARITY_THR = 0.90   # isoperimetric quotient threshold for traffic circl
 TC_MAX_RADIUS_M    = 50.0   # max bounding-circle radius (m)
 
 MERGE_PREC      = 0.5    # metres — coordinate rounding for vertex matching
-MERGE_ANGLE_TOL     = 10.0   # degrees — max deviation from 180° to allow merge
+MERGE_ANGLE_TOL     = 30.0   # degrees — max deviation from 180° to merge a multi-road (3+) junction
 MERGE_ANGLE_TOL_REF = 45.0   # degrees — wider tolerance for same-ref merges
+TC_MERGE_ANGLE_TOL  = 10.0   # degrees — straight-through tolerance for Part 4 roundabout-centre merges
 
 PARALLEL_BEARING_TOL = 20.0  # degrees — bearing similarity for parallel detection
 PARALLEL_DETECT_DIST = 15.0  # metres — max lateral distance to examine
@@ -622,7 +623,7 @@ def _merge_pass(gdf: gpd.GeoDataFrame, ref_only: bool = False):
 
     ref_only=True  — Phase 1: only pairs sharing the same non-empty ref,
                      angle tolerance MERGE_ANGLE_TOL_REF (45°).
-    ref_only=False — Phase 2: all pairs, angle tolerance MERGE_ANGLE_TOL (10°).
+    ref_only=False — Phase 2: all pairs, angle tolerance MERGE_ANGLE_TOL (30°).
     """
     df = gdf.reset_index(drop=True).copy()
     total_merged = 0
@@ -682,7 +683,10 @@ def _merge_pass(gdf: gpd.GeoDataFrame, ref_only: bool = False):
 
             i_idx, i_which, j_idx, j_which, diff = result
 
-            if diff > angle_tol:
+            # A 2-line junction (a line touching exactly one other line at this
+            # point) always merges, regardless of the angle between them. For
+            # 3+ lines the straightest pair must still be within angle_tol.
+            if len(seg_ids) > 2 and diff > angle_tol:
                 continue
 
             tun_i = str(df.iloc[i_idx].get("tunnel", "F") or "F").upper() == "T"
@@ -1136,7 +1140,7 @@ def _merge_through_at_points(df: gpd.GeoDataFrame, centroids: list):
     roads now converge on one point like a crossroads.  At each centre point, the
     straightest opposite pair — judged by each road's GENERAL heading
     (`_bearing_general`, ~3 vertices in from the centre) and the 10° rule
-    (`MERGE_ANGLE_TOL`) — is merged into one through-road, using the same pairing
+    (`TC_MERGE_ANGLE_TOL`) — is merged into one through-road, using the same pairing
     (`_best_pair`), concatenation (`_merge_geoms`), tunnel and class-rank winner
     rules as the Part 2 merge.
 
@@ -1181,7 +1185,7 @@ def _merge_through_at_points(df: gpd.GeoDataFrame, centroids: list):
                 continue
 
             i_idx, i_which, j_idx, j_which, diff = result
-            if diff > MERGE_ANGLE_TOL:
+            if diff > TC_MERGE_ANGLE_TOL:
                 continue
 
             tun_i = str(df.iloc[i_idx].get("tunnel", "F") or "F").upper() == "T"
