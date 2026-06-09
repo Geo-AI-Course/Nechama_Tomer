@@ -162,7 +162,8 @@ Tunnels (`tunnel = T`) are never merged with non-tunnel segments in either phase
 |-----------|--------|
 | Two roads with different class ranks | Keep the higher-rank road; delete the lower-rank road |
 | Two roads with the same class rank | Keep the longer road; delete the shorter road |
-| Y-shaped intersection where both branches mirror each other | Extend the longest (base) road to the perpendicular road or traffic circle |
+| Y-fork whose two arms both land on one through-road or one traffic circle | Extend the incoming stem from the fork point, along the fork→midpoint direction, **until it meets that line/circle**; delete both arms |
+| Y-fork whose arms do not share a target | Extend the incoming stem to the midpoint between the two arms' far ends; delete both arms |
 
 ---
 

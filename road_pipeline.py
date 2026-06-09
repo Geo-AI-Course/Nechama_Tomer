@@ -68,6 +68,7 @@ PARALLEL_EXTEND_MAX_M = 50.0  # metres — max snap distance when extending conn
 PARALLEL_SNAP_TO_JN_M = 5.0   # metres — prefer existing junction within this radius of natural snap point
 
 FORK_BEARING_TOL = 30.0  # degrees — arms of a Y-split share bearing within this
+Y_TARGET_SNAP_M  = 5.0   # metres — max distance for a Y arm's far end to "touch" a shared line/circle
 
 TC_MERGE_LOOKAHEAD = 3   # vertices in from the circle centre used to gauge a road's general direction
 
@@ -899,11 +900,135 @@ def part3_parallel_roads(gdf: gpd.GeoDataFrame):
     return result, max(0, n_removed), n_remerge, deleted_gdf
 
 
+def _build_circle_lookup(df: gpd.GeoDataFrame):
+    """Group traffic-circle segments into circles by shared endpoints.
+
+    Returns (seg_to_circle, circle_geom):
+      seg_to_circle : df row index of a circle segment → circle component id
+      circle_geom   : circle component id → unioned geometry of that circle
+    Mirrors the connectivity grouping in part4_traffic_circles.
+    """
+    tc_idx = [i for i in range(len(df))
+              if df.iloc[i].get("class") == "traffic circle"]
+    if not tc_idx:
+        return {}, {}
+
+    pos = {i: p for p, i in enumerate(tc_idx)}      # df idx → local idx
+    adj: dict = defaultdict(set)
+    for i in tc_idx:
+        c = list(df.iloc[i].geometry.coords)
+        adj[_rpt(c[0])].add(pos[i])
+        adj[_rpt(c[-1])].add(pos[i])
+    edges = [(a, b) for members in adj.values()
+             for a in members for b in members if a < b]
+    comps = _connected_components(len(tc_idx), edges)
+
+    seg_to_circle: dict = {}
+    circle_geom:   dict = {}
+    for cid, comp in enumerate(comps):
+        members = [tc_idx[p] for p in comp]
+        for i in members:
+            seg_to_circle[i] = cid
+        circle_geom[cid] = unary_union([df.iloc[i].geometry for i in members])
+    return seg_to_circle, circle_geom
+
+
+def _common_y_target(df: gpd.GeoDataFrame, sindex, ai: int, aj: int,
+                     stem_idx: int, far_a_xy, far_b_xy, seg_to_circle: dict,
+                     circle_geom: dict):
+    """Return a target geometry both fork arms terminate on, else None.
+
+    Same line:       a single non-circle segment within Y_TARGET_SNAP_M of BOTH
+                     arms' far ends → that segment's geometry.
+    Traffic circle:  circle segments near both far ends belonging to the SAME
+                     circle component → that circle's unioned geometry.
+    """
+    exclude = {ai, aj, stem_idx}
+
+    def _near(xy):
+        pt  = Point(xy)
+        buf = pt.buffer(Y_TARGET_SNAP_M)
+        hits = set()
+        for k in sindex.query(buf):
+            if k in exclude:
+                continue
+            if df.iloc[k].geometry.distance(pt) <= Y_TARGET_SNAP_M:
+                hits.add(int(k))
+        return hits
+
+    near_a = _near(far_a_xy)
+    near_b = _near(far_b_xy)
+
+    # Same plain line touching both far ends
+    common = {k for k in (near_a & near_b) if k not in seg_to_circle}
+    if common:
+        k = min(common)                       # deterministic pick
+        return df.iloc[k].geometry
+
+    # Same traffic circle touching both far ends
+    circ_a = {seg_to_circle[k] for k in near_a if k in seg_to_circle}
+    circ_b = {seg_to_circle[k] for k in near_b if k in seg_to_circle}
+    shared = circ_a & circ_b
+    if shared:
+        return circle_geom[min(shared)]
+
+    return None
+
+
+def _extend_to_target(fork_xy, mid_xy, target_geom):
+    """Point where a ray from fork_xy through mid_xy meets target_geom.
+
+    Picks the intersection nearest the fork (first boundary hit for a circle,
+    ≈ the midpoint for a straight line).  Falls back to the nearest point on the
+    target, then to mid_xy.
+    """
+    fx, fy = fork_xy
+    mx, my = mid_xy
+    dx, dy = mx - fx, my - fy
+    norm = math.hypot(dx, dy)
+    if norm == 0:
+        _, snap = nearest_points(Point(mid_xy), target_geom)
+        return (snap.x, snap.y)
+
+    # Ray from the fork through the midpoint, lengthened well past the target.
+    reach = norm + target_geom.length + Y_TARGET_SNAP_M + 1.0
+    far   = (fx + dx / norm * reach, fy + dy / norm * reach)
+    ray   = LineString([fork_xy, far])
+
+    inter = ray.intersection(target_geom)
+    if not inter.is_empty:
+        if inter.geom_type == "Point":
+            cands = [inter]
+        elif hasattr(inter, "geoms"):
+            cands = [g for g in inter.geoms if g.geom_type == "Point"] or \
+                    [Point(c) for g in inter.geoms
+                     for c in getattr(g, "coords", [])]
+        else:
+            cands = [Point(c) for c in getattr(inter, "coords", [])]
+        if cands:
+            fork_pt = Point(fork_xy)
+            best = min(cands, key=lambda p: fork_pt.distance(p))
+            return (best.x, best.y)
+
+    _, snap = nearest_points(Point(mid_xy), target_geom)
+    if not snap.is_empty:
+        return (snap.x, snap.y)
+    return mid_xy
+
+
 def _handle_y_splits(gdf: gpd.GeoDataFrame):
     """Find fork arms (two segs sharing an endpoint with similar bearings)
     and extend the incoming stem to bridge both arms.
+
+    When both arms terminate on a common through-road or on a single traffic
+    circle, the stem is instead extended along the fork→midpoint direction until
+    it actually meets that line/circle.  Otherwise the stem is extended to the
+    plain midpoint between the arms' far ends (original behaviour).
     """
     df = gdf.reset_index(drop=True).copy()
+
+    sindex = df.sindex
+    seg_to_circle, circle_geom = _build_circle_lookup(df)
 
     start_map: dict = defaultdict(list)
     end_map:   dict = defaultdict(list)
@@ -957,7 +1082,18 @@ def _handle_y_splits(gdf: gpd.GeoDataFrame):
                         return _rpt(c[-1] if which_end == "start" else c[0])
 
                     fp_a, fp_b = far_pt(ai), far_pt(aj)
-                    target = ((fp_a[0] + fp_b[0]) / 2, (fp_a[1] + fp_b[1]) / 2)
+                    mid = ((fp_a[0] + fp_b[0]) / 2, (fp_a[1] + fp_b[1]) / 2)
+
+                    # If both arms land on one through-road or one traffic
+                    # circle, extend along fork→midpoint until it meets that
+                    # target; otherwise bridge to the plain midpoint.
+                    target_geom = _common_y_target(
+                        df, sindex, ai, aj, stem_idx, fp_a, fp_b,
+                        seg_to_circle, circle_geom)
+                    if target_geom is not None:
+                        target = _extend_to_target(pt, mid, target_geom)
+                    else:
+                        target = mid
 
                     sc = list(stem_geom.coords)
                     new_coords = (sc + [target] if which_end == "start"

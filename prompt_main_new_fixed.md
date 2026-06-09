@@ -196,8 +196,15 @@ Detection: two segments share a common endpoint (the fork point) AND their
 bearings at that point differ by ≤ 30° (they diverge in similar directions).
 
 Action: find the incoming **stem** road (the segment arriving at the fork point
-from the other side). Extend the stem to the midpoint between the far ends of
-the two fork arms. Delete both fork arms.
+from the other side), then:
+
+- If both fork arms terminate on a **common through-road** or on a **single
+  traffic circle** (each arm's far end lies within 5 m of it), extend the stem
+  from the fork point along the fork→midpoint direction **until it meets that
+  line/circle**, and delete both fork arms. (For a circle the connector stops at
+  the ring boundary; Part 4 later carries it on to the centroid.)
+- Otherwise, extend the stem to the midpoint between the far ends of the two fork
+  arms and delete both arms (fallback).
 
 ### After processing
 
