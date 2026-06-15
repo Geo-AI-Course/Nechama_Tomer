@@ -58,7 +58,10 @@ Input shapefile
       │                         detect traffic circles (radius < 50 m)
       │                         → intermediate_data/OSM_roads_preprocess.shp
       ▼
-[Part 2] Merge lines ────────── merge contiguous segments whose endpoints
+[Part 2] Merge lines ────────── consolidate near-coincident endpoints onto a
+      │                         shared junction node (within 2 m) so OSM junctions
+      │                         that are a metre or two apart can merge;
+      │                         merge contiguous segments whose endpoints
       │                         touch at ~180° (±30° tolerance), and always
       │                         merge true 2-line junctions regardless of angle;
       │                         handle 2-line, T, X/+, and multi-way junctions;
@@ -67,7 +70,9 @@ Input shapefile
       │                         recalculate length_m, length_km
       │                         → intermediate_data/OSM_roads_merge.shp
       ▼
-[Part 3] Parallel roads ─────── detect and collapse parallel duplicate carriageways;
+[Part 3] Parallel roads ─────── detect and collapse parallel duplicate carriageways
+      │                         (--mode mixed = all classes; --mode divided =
+      │                         Highway-class dual carriageways only);
       │                         keep higher-ranked road, or longer if same rank;
       │                         extend Y-intersection branches to perpendicular road
       │                         or traffic circle;
@@ -131,7 +136,17 @@ Each detected circle is emitted as a **single merged line feature** (the arc seg
 
 ## Line merging rules (Part 2)
 
-Merging runs in two sequential phases, each iterated until convergence:
+**Node consolidation (pre-merge):**  
+Before merging, all non-circle segment endpoints lying within **2 m** of each other
+(`NODE_SNAP_M`) are clustered (single-linkage) and snapped to their cluster's mean
+coordinate. OSM frequently stores a junction whose incident segments end a metre or
+two apart; the exact rounded-coordinate matching used for merging (`MERGE_PREC`, 0.5 m)
+would otherwise never see them as touching. Snapping them onto one shared vertex lets
+those genuine junctions merge. Traffic-circle features are left untouched, and a
+segment whose two endpoints fall in the same cluster is skipped (so short segments are
+never collapsed to zero length).
+
+Merging then runs in two sequential phases, each iterated until convergence:
 
 **Phase 1 — ref-based pass (runs first):**  
 Segments that share the same non-empty `ref` road number and whose endpoints touch
@@ -160,6 +175,13 @@ Tunnels (`tunnel = T`) are never merged with non-tunnel segments in either phase
 ---
 
 ## Parallel road handling (Part 3)
+
+**Processing mode (`--mode`):**  
+`mixed` (default) collapses parallel carriageways across **all** road classes — the
+original behaviour. `divided` restricts both parallel-collapse and Y-split handling to
+**Highway-class** roads (`DIVIDED_RANK_MAX = 1`), since real dual carriageways are almost
+always Highways. Use `divided` to avoid falsely collapsing closely-spaced local streets in
+dense grids.
 
 | Condition | Action |
 |-----------|--------|
@@ -201,7 +223,15 @@ attributes, and tunnel/non-tunnel segments are never merged together.
 
 ```bash
 python road_pipeline.py --shp roads_OSM/roads_OSM.shp
+python road_pipeline.py --shp roads_OSM/roads_OSM.shp --mode divided
 ```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--shp` | *(required)* | Input shapefile path |
+| `--crs` | `32636` | EPSG code for the projected CRS (UTM36N) |
+| `--out` | `final/OSM_roads_clean.shp` | Final output path |
+| `--mode` | `mixed` | Part 3 parallel handling: `mixed` (all classes) or `divided` (Highway dual carriageways only) |
 
 Intermediate shapefiles are written automatically to `intermediate_data/`.  
 The final cleaned shapefile is written to the `final/` folder.

@@ -58,6 +58,7 @@ TC_CIRCULARITY_THR = 0.90   # isoperimetric quotient threshold for traffic circl
 TC_MAX_RADIUS_M    = 50.0   # max bounding-circle radius (m)
 
 MERGE_PREC      = 0.5    # metres — coordinate rounding for vertex matching
+NODE_SNAP_M     = 2.0    # metres — endpoints within this distance are consolidated to a shared junction node (pre-merge)
 MERGE_ANGLE_TOL     = 30.0   # degrees — max deviation from 180° to merge a multi-road (3+) junction
 MERGE_ANGLE_TOL_REF = 45.0   # degrees — wider tolerance for same-ref merges
 TC_MERGE_ANGLE_TOL  = 10.0   # degrees — straight-through tolerance for Part 4 roundabout-centre merges
@@ -67,6 +68,7 @@ PARALLEL_DETECT_DIST = 15.0  # metres — max lateral distance to examine
 PARALLEL_CLOSE_DIST  = 10.0  # metres — lateral threshold for parallel detection
 PARALLEL_EXTEND_MAX_M = 50.0  # metres — max snap distance when extending connectors to kept parallel
 PARALLEL_SNAP_TO_JN_M = 5.0   # metres — prefer existing junction within this radius of natural snap point
+DIVIDED_RANK_MAX = 1   # --mode divided: only collapse parallels/forks among classes at/above this rank (1 = Highway)
 
 FORK_BEARING_TOL = 30.0  # degrees — arms of a Y-split share bearing within this
 Y_TARGET_SNAP_M  = 5.0   # metres — max distance for a Y arm's far end to "touch" a shared line/circle
@@ -560,6 +562,81 @@ def _detect_traffic_circles(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 # Part 2 — Merge lines
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _consolidate_nodes(gdf: gpd.GeoDataFrame, tol: float = NODE_SNAP_M):
+    """Snap nearby segment endpoints onto a shared junction node (pre-merge pass).
+
+    OSM frequently stores a junction whose incident segments end a metre or two
+    apart, so the exact rounded-coordinate matching used by Part 2 (`_rpt` at
+    MERGE_PREC) never sees them as touching and the segments fail to merge.  This
+    pass clusters all non-circle endpoints lying within `tol` of each other
+    (single-linkage, via `_connected_components`) and moves every endpoint in a
+    cluster to the cluster's mean coordinate, so a genuine junction shares one
+    exact vertex.  Traffic-circle features are left untouched, and a segment whose
+    two endpoints fall in the same cluster is skipped to avoid collapsing it to
+    zero length.  Returns (new_gdf, n_endpoints_snapped).
+    """
+    df = gdf.reset_index(drop=True).copy()
+    is_tc = ((df["class"] == "traffic circle").tolist()
+             if "class" in df.columns else [False] * len(df))
+
+    pts: list = []   # (df_idx, which, x, y)
+    for i in range(len(df)):
+        if is_tc[i]:
+            continue
+        c = list(df.iloc[i].geometry.coords)
+        pts.append((i, "start", c[0][0], c[0][1]))
+        pts.append((i, "end",   c[-1][0], c[-1][1]))
+    if len(pts) < 2:
+        return df, 0
+
+    ep_gdf = gpd.GeoDataFrame(
+        {"pid": range(len(pts))},
+        geometry=[Point(p[2], p[3]) for p in pts],
+        crs=df.crs,
+    )
+    ep_si = ep_gdf.sindex
+
+    edges: list = []
+    for a in range(len(pts)):
+        pa = ep_gdf.geometry.iloc[a]
+        for b in ep_si.query(pa.buffer(tol)):
+            b = int(b)
+            if b <= a:
+                continue
+            if pa.distance(ep_gdf.geometry.iloc[b]) <= tol:
+                edges.append((a, b))
+
+    rep: dict = {}                       # pts index → snapped (x, y)
+    for comp in _connected_components(len(pts), edges):
+        if len(comp) < 2:
+            continue
+        xs = sum(pts[k][2] for k in comp) / len(comp)
+        ys = sum(pts[k][3] for k in comp) / len(comp)
+        for k in comp:
+            rep[k] = (xs, ys)
+    if not rep:
+        return df, 0
+
+    new_ends: dict = defaultdict(dict)   # df_idx → {"start": (x,y), "end": (x,y)}
+    for k, (df_idx, which, _x, _y) in enumerate(pts):
+        if k in rep:
+            new_ends[df_idx][which] = rep[k]
+
+    n_snapped = 0
+    for df_idx, ends in new_ends.items():
+        c = list(df.iloc[df_idx].geometry.coords)
+        new_start = ends.get("start", c[0])
+        new_end   = ends.get("end",   c[-1])
+        if _rpt(new_start) == _rpt(new_end):
+            continue                     # would collapse a short segment to zero length
+        new_coords = ([new_start] + c[1:-1] + [new_end] if len(c) > 2
+                      else [new_start, new_end])
+        df.at[df_idx, "geometry"] = LineString(new_coords)
+        n_snapped += len(ends)
+
+    return df, n_snapped
+
+
 def _merge_geoms(geom_a: LineString, which_a: str,
                  geom_b: LineString, which_b: str) -> LineString | None:
     """Concatenate two lines sharing a junction endpoint.
@@ -730,6 +807,11 @@ def _merge_pass(gdf: gpd.GeoDataFrame, ref_only: bool = False):
 
 
 def part2_merge_lines(gdf: gpd.GeoDataFrame):
+    gdf, n_snapped = _consolidate_nodes(gdf)
+    if n_snapped:
+        print(f"  Node consolidation: snapped {n_snapped:,} endpoint(s) "
+              f"to shared junctions (within {NODE_SNAP_M:.1f} m)")
+
     df = _expand_compound_refs(gdf)
     n_expanded = len(df) - len(gdf)
     if n_expanded:
@@ -828,8 +910,9 @@ def _extend_to_parallel(df: gpd.GeoDataFrame, dropped: set,
                     df.at[conn_idx, "geometry"] = LineString(new_coords)
 
 
-def part3_parallel_roads(gdf: gpd.GeoDataFrame):
+def part3_parallel_roads(gdf: gpd.GeoDataFrame, mode: str = "mixed"):
     df           = gdf.reset_index(drop=True).copy()
+    divided      = mode == "divided"
     dropped: set = set()
     drop_to_kept: dict = {}
 
@@ -844,6 +927,9 @@ def part3_parallel_roads(gdf: gpd.GeoDataFrame):
         geom_i = row_i.geometry
         b_i    = _line_bearing(geom_i)
         rank_i = CLASS_RANK.get(row_i.get("class", "Other"), 5)
+        # In --mode divided, only dual carriageways (Highway rank) are collapsed.
+        if divided and rank_i > DIVIDED_RANK_MAX:
+            continue
 
         for j in sindex.query(geom_i.buffer(PARALLEL_DETECT_DIST)):
             if j <= i or j in dropped:
@@ -854,6 +940,8 @@ def part3_parallel_roads(gdf: gpd.GeoDataFrame):
             geom_j = row_j.geometry
             b_j    = _line_bearing(geom_j)
             rank_j = CLASS_RANK.get(row_j.get("class", "Other"), 5)
+            if divided and rank_j > DIVIDED_RANK_MAX:
+                continue
 
             # Must be parallel in bearing
             if not _parallel(b_i, b_j, PARALLEL_BEARING_TOL):
@@ -890,7 +978,8 @@ def part3_parallel_roads(gdf: gpd.GeoDataFrame):
                               geometry="geometry").reset_index(drop=True)
 
     # Y-split handling
-    result, n_fork, deleted_forks = _handle_y_splits(result)
+    result, n_fork, deleted_forks = _handle_y_splits(
+        result, rank_max=(DIVIDED_RANK_MAX if divided else None))
     if n_fork:
         print(f"  Y-split: removed {n_fork:,} fork arms")
 
@@ -1021,7 +1110,7 @@ def _extend_to_target(fork_xy, mid_xy, target_geom):
     return mid_xy
 
 
-def _handle_y_splits(gdf: gpd.GeoDataFrame):
+def _handle_y_splits(gdf: gpd.GeoDataFrame, rank_max: int | None = None):
     """Find fork arms (two segs sharing an endpoint with similar bearings)
     and extend the incoming stem to bridge both arms.
 
@@ -1029,6 +1118,9 @@ def _handle_y_splits(gdf: gpd.GeoDataFrame):
     circle, the stem is instead extended along the fork→midpoint direction until
     it actually meets that line/circle.  Otherwise the stem is extended to the
     plain midpoint between the arms' far ends (original behaviour).
+
+    `rank_max` (set in --mode divided) restricts fork handling to arms whose class
+    rank is at/above that value (e.g. 1 = Highway only); None processes all forks.
     """
     df = gdf.reset_index(drop=True).copy()
 
@@ -1061,6 +1153,12 @@ def _handle_y_splits(gdf: gpd.GeoDataFrame):
                     row_b = df.iloc[aj]
                     if (row_a.get("class") == "traffic circle" or
                             row_b.get("class") == "traffic circle"):
+                        continue
+
+                    # --mode divided: only fork arms at/above rank_max (Highway)
+                    if rank_max is not None and (
+                            CLASS_RANK.get(row_a.get("class", "Other"), 5) > rank_max or
+                            CLASS_RANK.get(row_b.get("class", "Other"), 5) > rank_max):
                         continue
 
                     # Both arms must leave the fork in similar directions
@@ -1350,6 +1448,10 @@ def main():
                     help="EPSG code for projected CRS")
     ap.add_argument("--out", default="final/OSM_roads_clean.shp",
                     help="Output shapefile path")
+    ap.add_argument("--mode", choices=["mixed", "divided"], default="mixed",
+                    help="Parallel-road handling (Part 3): 'mixed' collapses "
+                         "parallel carriageways across all classes; 'divided' "
+                         "restricts collapse to Highway-class dual carriageways only")
     args = ap.parse_args()
 
     sep = "=" * 68
@@ -1370,9 +1472,9 @@ def main():
     _save_intermediate(gdf, "OSM_roads_merge")
     _save_deleted(deleted2, "deleted_part2")
 
-    print("\n[Part 3] Parallel roads")
+    print(f"\n[Part 3] Parallel roads (mode: {args.mode})")
     n0 = len(gdf)
-    gdf, n_removed3, n_remerge3, deleted3 = part3_parallel_roads(gdf)
+    gdf, n_removed3, n_remerge3, deleted3 = part3_parallel_roads(gdf, mode=args.mode)
     _record("3. Parallel roads", n0, len(gdf), n_removed=n_removed3, n_merged=n_remerge3)
     _save_intermediate(gdf, "OSM_roads_merge_paralle")
     _save_deleted(deleted3, "deleted_part3")

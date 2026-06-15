@@ -85,6 +85,21 @@ Iteratively merge pairs of line segments whose endpoints touch and whose
 angle is close to 180° (nearly straight-through). Repeat until no new merges
 are possible.
 
+### Node consolidation (pre-merge step)
+
+Before any merging, consolidate near-coincident junction nodes. OSM frequently
+stores a junction whose incident segments end a metre or two apart, so the 0.5 m
+rounding tolerance used for touching never sees them as connected and the segments
+fail to merge.
+
+- Collect the start and end endpoints of every **non-traffic-circle** segment.
+- Cluster endpoints lying within **2 m** of each other (`NODE_SNAP_M`),
+  single-linkage (transitively grouped via connected components).
+- Move every endpoint in a cluster to the cluster's **mean coordinate**, so the
+  incident segments share one exact vertex.
+- Leave traffic-circle features unchanged. Skip any segment whose two endpoints
+  fall in the same cluster, so short segments are never collapsed to zero length.
+
 ### Definitions
 
 - **Touching:** Two lines touch when a start or end vertex of one line coincides
@@ -174,6 +189,16 @@ Save to `intermediate_data/OSM_roads_merge.shp`.
 Many roads are represented by 2 or more parallel line features (e.g. dual
 carriageways, divided roads). This part collapses parallel pairs into a single
 representative feature.
+
+### Processing mode (`--mode`)
+
+- **`mixed`** (default): collapse parallel carriageways across **all** road classes
+  — the original behaviour.
+- **`divided`**: restrict both parallel-collapse and Y-split handling to
+  **Highway-class** roads (rank ≤ `DIVIDED_RANK_MAX`, i.e. rank 1). Real dual
+  carriageways are almost always Highways, so this avoids falsely collapsing
+  closely-spaced local streets in dense grids. Non-Highway pairs and forks are left
+  untouched.
 
 ### Detection
 
@@ -314,6 +339,7 @@ python road_pipeline.py --shp input.shp --crs 32636 --out final/output.shp
 | `--shp` | *(required)* | Input shapefile path |
 | `--crs` | `32636` | EPSG code for projected CRS (UTM36N) |
 | `--out` | `final/OSM_roads_clean.shp` | Final output path |
+| `--mode` | `mixed` | Part 3 parallel handling: `mixed` (all classes) or `divided` (Highway dual carriageways only) |
 
 ---
 
@@ -330,3 +356,5 @@ python road_pipeline.py --shp input.shp --crs 32636 --out final/output.shp
 | Traffic circle geometry output | Each detected circle is merged into **one** line feature; near-complete circles are closed with a **fitted circular arc** (continuing the curve), not a straight chord. |
 | Merging at the traffic-circle centre (Part 4) | After connecting roads to the centroid, merge straight through-road pairs (X / + / T) there. Direction is judged by each road's **general heading** (~3 vertices in from the centre, to ignore the roundabout-entry kink), then a **tighter ≤ 10°** straight-through rule applies (`TC_MERGE_ANGLE_TOL`) — Part 4 stays at 10° even though Part 2 now uses 30°. |
 | Merge angle tolerance (Part 2) | A true 2-line junction always merges regardless of angle. A multi-road (3+) junction (T / X / + / 5+) merges its straightest pair when within **≤ 30°** of straight (`MERGE_ANGLE_TOL`); the ref-based pass uses ≤ 45°. |
+| Node consolidation (Part 2 pre-step) | Before merging, non-circle endpoints within **2 m** (`NODE_SNAP_M`) are clustered (single-linkage) and snapped to the cluster's mean coordinate, so junctions stored a metre or two apart in OSM share one exact vertex and can merge. Traffic circles are untouched; a segment whose two endpoints share a cluster is skipped to avoid zero-length collapse. |
+| Parallel processing mode (Part 3) | `--mode mixed` (default) collapses parallels across all classes; `--mode divided` restricts parallel-collapse and Y-split handling to Highway-class roads (`DIVIDED_RANK_MAX = 1`), since dual carriageways are almost always Highways. |
